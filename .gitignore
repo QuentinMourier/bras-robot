@@ -3,3 +3,4 @@ venv/
 __pycache__/
 *.pt
 yolo*_ncnn_model/
+*.onnx
