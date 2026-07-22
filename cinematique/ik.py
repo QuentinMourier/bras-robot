@@ -1,7 +1,7 @@
 """Cinématique directe et inverse du SO-ARM101, à partir de l'URDF officiel.
 
-Remplace l'ancien bras.py (dimensions approximatives codées à la main) :
-ici la géométrie exacte vient de urdf/so101_new_calib.urdf, chargé par ikpy.
+La géométrie exacte vient de urdf/so101_new_calib.urdf, chargée par ikpy
+(remplace l'ancienne approximation manuelle, cf. project_bras_robot_cinematique).
 """
 
 from pathlib import Path
@@ -23,16 +23,59 @@ MASQUE_LIENS_ACTIFS = [
 ]
 bras.active_links_mask = MASQUE_LIENS_ACTIFS
 
+# ikpy fait de l'optimisation locale : partir toujours d'angles à zéro peut
+# converger vers un mauvais minimum local sur certaines cibles pourtant
+# atteignables (observé jusqu'à 72 mm d'erreur lors du benchmark). On limite
+# ce risque avec plusieurs essais depuis des points de départ différents,
+# et on s'arrête dès qu'un essai est assez précis (pas la peine de tous les
+# faire à chaque fois).
+N_ESSAIS_MULTI_DEPART = 6
+SEUIL_ARRET_ANTICIPE_M = 0.001  # 1 mm : au-delà, pas la peine d'essayer un autre départ
+_rng = np.random.default_rng()
+
+
+def _points_de_depart(angles_initiaux):
+    """Construit la liste des vecteurs de départ à essayer pour l'IK, dans l'ordre :
+    1. les angles initiaux fournis par l'appelant (souvent la position actuelle du
+       bras : le meilleur départ possible, la cible n'étant généralement pas loin) ;
+    2. tous les angles à zéro (le défaut historique) ;
+    3. des tirages aléatoires dans les butées de chaque articulation, pour
+       échapper aux minima locaux propres à la pose zéro.
+    """
+    departs = []
+    if angles_initiaux is not None:
+        departs.append(np.array(angles_initiaux, dtype=float))
+    departs.append(np.zeros(len(bras.links)))
+    while len(departs) < N_ESSAIS_MULTI_DEPART:
+        tirage = [0.0]
+        for link in bras.links[1:-1]:
+            bas, haut = link.bounds
+            tirage.append(_rng.uniform(bas, haut))
+        tirage.append(0.0)
+        departs.append(np.array(tirage))
+    return departs
+
 
 def angles_pour(x: float, y: float, z: float, angles_initiaux=None) -> np.ndarray:
     """Cinématique inverse : position cible (x, y, z) en mètres -> angles des 5 servos (rad).
 
+    Essaie plusieurs points de départ (voir _points_de_depart) et retourne la
+    meilleure solution trouvée, pour limiter le risque de mauvaise convergence.
     Retourne le vecteur complet des liens ikpy (avec des 0 aux liens fixes) ;
-    utiliser angles[1:6] pour les 5 angles moteurs utiles.
+    utiliser angles_utiles(...) pour les 5 angles moteurs utiles.
     """
-    if angles_initiaux is None:
-        angles_initiaux = [0] * len(bras.links)
-    return bras.inverse_kinematics([x, y, z], initial_position=angles_initiaux)
+    cible = np.array([x, y, z])
+    meilleure_solution, meilleure_erreur = None, np.inf
+
+    for depart in _points_de_depart(angles_initiaux):
+        solution = bras.inverse_kinematics(cible, initial_position=depart)
+        erreur = np.linalg.norm(bras.forward_kinematics(solution)[:3, 3] - cible)
+        if erreur < meilleure_erreur:
+            meilleure_solution, meilleure_erreur = solution, erreur
+        if meilleure_erreur < SEUIL_ARRET_ANTICIPE_M:
+            break
+
+    return meilleure_solution
 
 
 def position_de(angles) -> np.ndarray:
