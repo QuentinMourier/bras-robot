@@ -69,6 +69,47 @@ def cmd_scan_tous_bauds(args):
     return 0
 
 
+def cmd_bilan(bus, args):
+    """Tableau récapitulatif de toute la chaîne, en lecture seule."""
+    presents = bus.scanner()
+    if not presents:
+        print("Aucun servo ne répond.")
+        return 1
+
+    print(f"{'id':>2}  {'nom':<14} {'position':>9} {'angle':>8} {'tension':>8} "
+          f"{'temp':>5}  {'mode':<10} {'butées':>10} {'offset':>7}  couple")
+    anomalies = []
+    for sid in presents:
+        etat = bus.etat(sid)
+        butees = f"{etat['angle_min']}-{etat['angle_max']}"
+        print(f"{sid:>2}  {NOMS_ARM101.get(sid, '?'):<14} {etat['position']:>9} "
+              f"{pas_en_degres(etat['position']):>+7.1f}° {etat['tension']:>7.1f}V "
+              f"{etat['temperature']:>4}°C  {MODES.get(etat['mode'], '?'):<10} "
+              f"{butees:>10} {etat['offset']:>7}  "
+              f"{'actif' if etat['couple_actif'] else 'coupé'}")
+
+        if etat["tension"] < 9.0:
+            anomalies.append(f"servo {sid} : {etat['tension']:.1f} V, trop bas")
+        if etat["temperature"] > 55:
+            anomalies.append(f"servo {sid} : {etat['temperature']} °C, trop chaud")
+        if etat["mode"] != 0:
+            anomalies.append(f"servo {sid} : mode {MODES.get(etat['mode'])}, "
+                             "attendu position")
+
+    manquants = [sid for sid in NOMS_ARM101 if sid not in presents]
+    if manquants:
+        noms = ", ".join(f"{sid} ({NOMS_ARM101[sid]})" for sid in manquants)
+        anomalies.append(f"absents du bus : {noms}")
+
+    if anomalies:
+        print("\nAnomalies :")
+        for ligne in anomalies:
+            print(f"  - {ligne}")
+        return 1
+    print(f"\n{len(presents)} servos, aucune anomalie.")
+    return 0
+
+
 def cmd_info(bus, args):
     """Relevé complet d'un servo."""
     etat = bus.etat(args.id)
@@ -215,6 +256,9 @@ def construire_parseur():
     p.add_argument("--tous-bauds", action="store_true",
                    help="balaye toutes les vitesses de transmission")
     p.set_defaults(fonction=cmd_scan)
+
+    p = sous.add_parser("bilan", help="tableau récapitulatif de la chaîne")
+    p.set_defaults(fonction=cmd_bilan)
 
     p = sous.add_parser("info", help="relevé complet d'un servo")
     p.add_argument("id", type=int)
