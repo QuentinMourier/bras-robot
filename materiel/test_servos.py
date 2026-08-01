@@ -33,6 +33,36 @@ NOMS_ARM101 = {1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
                4: "wrist_flex", 5: "wrist_roll", 6: "gripper"}
 MODES = {0: "position", 1: "roue libre", 2: "PWM", 3: "pas à pas"}
 
+# Plages autorisées, en degrés servo autour du centre (2048 pas).
+#
+# Les amplitudes viennent de urdf/so101_new_calib.urdf. Attention : le signe du
+# servo ne correspond pas forcément au signe URDF. Pour les axes 2, 3 et 4 la
+# plage est symétrique, donc la question ne se pose pas. Pour la base, la sonde
+# du 1er août a montré que le sens positif va vers la pince du support : on la
+# bride donc à +20° tant que le bras est monté sur ce support temporaire.
+# La pince (axe 6) est asymétrique et son sens n'est pas encore vérifié : sa
+# plage reste volontairement étroite en attendant.
+LIMITES_DEG = {
+    1: (-110.0, 20.0),    # design ±110°, bridé côté pince du support
+    2: (-100.0, 100.0),
+    3: (-96.8, 96.8),
+    4: (-95.0, 95.0),
+    5: (-157.2, 157.2),
+    6: (-100.0, 10.0),    # sens présumé inversé par rapport à l'URDF
+}
+
+CHARGE_MAX = 400  # pour-mille du couple maxi : seuil d'arrêt sur obstacle
+PAS_INCREMENT = 10.0  # amplitude d'un palier, en degrés
+
+
+def limiter(sid, degres):
+    """Ramène un angle dans la plage autorisée. Retourne (angle, bridé)."""
+    if sid not in LIMITES_DEG:
+        return degres, False
+    bas, haut = LIMITES_DEG[sid]
+    borne = max(bas, min(haut, degres))
+    return borne, borne != degres
+
 
 def cmd_scan(bus, args):
     """Liste les servos présents sur le bus."""
@@ -179,7 +209,7 @@ def cmd_prep(bus, args):
         bus.regler_eprom(args.id, ADR_ANGLE_MAX, 4095, 2)
 
     print(f"  centrage sur {CENTRE} pas...")
-    bus.couple(args.id, True)
+    bus.tenir(args.id)
     bus.aller_a(args.id, CENTRE, vitesse=args.vitesse, accel=args.accel)
     atteint = bus.attendre_arret(args.id)
     ecart = atteint - CENTRE
@@ -197,7 +227,7 @@ def cmd_prep(bus, args):
 def cmd_pos(bus, args):
     """Envoie le servo à un angle donné, en degrés autour du centre."""
     cible = degres_en_pas(args.degres)
-    bus.couple(args.id, True)
+    bus.tenir(args.id)
     bus.aller_a(args.id, cible, vitesse=args.vitesse, accel=args.accel)
     atteint = bus.attendre_arret(args.id)
     print(f"cible {cible} pas ({args.degres:+.1f}°) -> "
@@ -214,7 +244,7 @@ def cmd_test(bus, args):
         print("Tension trop basse, test annulé.")
         return 1
 
-    bus.couple(args.id, True)
+    bus.tenir(args.id)
     for angle in [0, args.amplitude, 0, -args.amplitude, 0]:
         cible = degres_en_pas(angle)
         bus.aller_a(args.id, cible, vitesse=args.vitesse, accel=args.accel)
@@ -228,6 +258,56 @@ def cmd_test(bus, args):
 
     print("\nTest terminé. Le servo tient encore la position ; "
           f"python3 {sys.argv[0]} libre {args.id} pour le relâcher.")
+    return 0
+
+
+def cmd_axe(bus, args):
+    """Amène une articulation du bras assemblé à un angle, par paliers surveillés."""
+    cible, bride = limiter(args.id, args.degres)
+    if bride:
+        bas, haut = LIMITES_DEG[args.id]
+        print(f"Consigne {args.degres:+.1f}° hors plage, ramenée à {cible:+.1f}° "
+              f"(limites {bas:+.0f}° / {haut:+.0f}°).")
+
+    depart = pas_en_degres(bus.tenir(args.id, vitesse=args.vitesse,
+                                     accel=args.accel))
+    nom = NOMS_ARM101.get(args.id, "?")
+    print(f"Axe {args.id} ({nom}) : {depart:+.1f}° -> {cible:+.1f}°")
+
+    # Découpage en paliers : un obstacle est ainsi rencontré à faible élan.
+    ecart = cible - depart
+    nombre = max(1, int(abs(ecart) / PAS_INCREMENT + 0.999))
+    for i in range(1, nombre + 1):
+        palier = depart + ecart * i / nombre
+        atteint, pic, obstacle = bus.aller_a_surveille(
+            args.id, degres_en_pas(palier), vitesse=args.vitesse,
+            accel=args.accel, charge_max=args.charge_max)
+        reel = pas_en_degres(atteint)
+        etat = "OBSTACLE" if obstacle else f"charge max {pic}"
+        print(f"  palier {i}/{nombre} : visé {palier:+7.1f}°, "
+              f"atteint {reel:+7.1f}°  ({etat})")
+
+        if obstacle:
+            print(f"\nArrêt : la charge a dépassé {args.charge_max} ‰ à "
+                  f"{reel:+.1f}°. Le bras tient sa position, l'effort est relâché.")
+            print("Vérifiez ce qui bloque avant de relancer.")
+            return 1
+
+    final = bus.etat(args.id)
+    print(f"\nArrivé à {pas_en_degres(final['position']):+.1f}°, "
+          f"{final['temperature']} °C, {final['courant_mA']:.0f} mA")
+    return 0
+
+
+def cmd_tenir(bus, args):
+    """Engage le couple là où le bras se trouve, sans aucun mouvement."""
+    cibles = [args.id] if args.id is not None else bus.scanner()
+    for sid in cibles:
+        position = bus.tenir(sid, vitesse=args.vitesse, accel=args.accel)
+        print(f"servo {sid:>2} ({NOMS_ARM101.get(sid, '?'):<14}) : couple engagé "
+              f"sur {position} pas ({pas_en_degres(position):+.1f}°)")
+    print("\nLe bras tient sa position actuelle. Il ne bougera que sur "
+          "consigne explicite.")
     return 0
 
 
@@ -283,6 +363,17 @@ def construire_parseur():
     p.add_argument("--amplitude", type=float, default=30,
                    help="amplitude en degrés (défaut 30)")
     p.set_defaults(fonction=cmd_test)
+
+    p = sous.add_parser("axe", help="bouge une articulation du bras assemblé")
+    p.add_argument("id", type=int)
+    p.add_argument("degres", type=float)
+    p.add_argument("--charge-max", type=int, default=CHARGE_MAX,
+                   help=f"seuil d'arrêt sur obstacle (défaut {CHARGE_MAX} ‰)")
+    p.set_defaults(fonction=cmd_axe)
+
+    p = sous.add_parser("tenir", help="engage le couple sans bouger")
+    p.add_argument("id", type=int, nargs="?")
+    p.set_defaults(fonction=cmd_tenir)
 
     p = sous.add_parser("libre", help="coupe le couple")
     p.add_argument("id", type=int, nargs="?")

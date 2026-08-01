@@ -211,12 +211,69 @@ class BusServos:
         """Active ou coupe le maintien en position (couple moteur)."""
         self.ecrire(sid, ADR_COUPLE, 1 if actif else 0)
 
+    def tenir(self, sid: int, vitesse=300, accel=10) -> int:
+        """Active le couple sur la position actuelle, sans à-coup.
+
+        Indispensable sur un bras assemblé : le registre de consigne conserve
+        la dernière valeur écrite, souvent très loin de l'endroit où la gravité
+        a fait retomber l'articulation. Activer le couple sans précaution
+        déclencherait un rattrapage brutal vers cette ancienne consigne. On
+        recopie donc la position réelle dans la consigne *avant* d'engager.
+        """
+        position = self.lire(sid, ADR_POS, 2)
+        self.ecrire(sid, ADR_ACCEL, accel)
+        self.ecrire(sid, ADR_VITESSE_CIBLE, vitesse, 2)
+        self.ecrire(sid, ADR_POS_CIBLE, position, 2)
+        self.couple(sid, True)
+        return position
+
     def aller_a(self, sid: int, position: int, vitesse=1000, accel=30) -> None:
         """Envoie une consigne de position, en pas (0 à 4095)."""
         position = max(0, min(RESOLUTION - 1, int(position)))
         self.ecrire(sid, ADR_ACCEL, accel)
         self.ecrire(sid, ADR_VITESSE_CIBLE, vitesse, 2)
         self.ecrire(sid, ADR_POS_CIBLE, position, 2)
+
+    def aller_a_surveille(self, sid: int, position: int, vitesse=200, accel=10,
+                          charge_max=400, delai_max=12.0):
+        """Va à une position en surveillant la charge, et cède sur obstacle.
+
+        Sur un bras assemblé, une consigne irréalisable (collision, butée
+        mécanique) fait forcer le moteur indéfiniment : il chauffe, tire du
+        courant et peut casser une pièce. On surveille donc la charge pendant
+        le trajet, et dès qu'elle dépasse le seuil on fige la consigne sur la
+        position courante, ce qui relâche l'effort sans couper le maintien.
+
+        Retourne (position atteinte, pic de charge, arrêté sur obstacle).
+        """
+        position = max(0, min(RESOLUTION - 1, int(position)))
+        self.ecrire(sid, ADR_ACCEL, accel)
+        self.ecrire(sid, ADR_VITESSE_CIBLE, vitesse, 2)
+        self.ecrire(sid, ADR_POS_CIBLE, position, 2)
+
+        fin = time.monotonic() + delai_max
+        pic = 0
+        precedente = self.lire(sid, ADR_POS, 2)
+        stables = 0
+        while time.monotonic() < fin:
+            time.sleep(0.05)
+            actuelle = self.lire(sid, ADR_POS, 2)
+            charge = abs(_signe(self.lire(sid, ADR_CHARGE, 2), bit_signe=10))
+            pic = max(pic, charge)
+
+            if charge > charge_max:
+                self.ecrire(sid, ADR_POS_CIBLE, actuelle, 2)
+                return actuelle, pic, True
+
+            bouge = self.lire(sid, ADR_EN_MOUVEMENT, 1)
+            if not bouge and abs(actuelle - precedente) <= 2:
+                stables += 1
+                if stables >= 3:
+                    return actuelle, pic, False
+            else:
+                stables = 0
+            precedente = actuelle
+        return precedente, pic, False
 
     def attendre_arret(self, sid: int, delai_max=8.0) -> int:
         """Attend la fin du mouvement et retourne la position atteinte.
