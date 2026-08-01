@@ -19,12 +19,13 @@ Exemples :
 """
 
 import argparse
+import json
 import sys
 import time
 
 from sts3215 import (BAUDS, CENTRE, ADR_ANGLE_MAX, ADR_ANGLE_MIN, ADR_MODE,
-                     ADR_OFFSET, BusServos, ErreurServo, degres_en_pas,
-                     pas_en_degres)
+                     ADR_OFFSET, ADR_POS, BusServos, ErreurServo,
+                     degres_en_pas, pas_en_degres)
 
 PORT_DEFAUT = "/dev/ttyACM0"
 BAUD_DEFAUT = 1_000_000
@@ -35,20 +36,23 @@ MODES = {0: "position", 1: "roue libre", 2: "PWM", 3: "pas à pas"}
 
 # Plages autorisées, en degrés servo autour du centre (2048 pas).
 #
-# Les amplitudes viennent de urdf/so101_new_calib.urdf. Attention : le signe du
-# servo ne correspond pas forcément au signe URDF. Pour les axes 2, 3 et 4 la
-# plage est symétrique, donc la question ne se pose pas. Pour la base, la sonde
-# du 1er août a montré que le sens positif va vers la pince du support : on la
-# bride donc à +20° tant que le bras est monté sur ce support temporaire.
-# La pince (axe 6) est asymétrique et son sens n'est pas encore vérifié : sa
-# plage reste volontairement étroite en attendant.
+# Mesurées à la main le 1er août 2026 sur le bras monté (commande `calibrer`,
+# 20 000 relevés par axe, résultats bruts dans calibration.json), puis rentrées
+# 3° en deçà des butées réelles pour ne jamais venir taper dedans.
+#
+# Les amplitudes obtenues correspondent toutes au design de
+# urdf/so101_new_calib.urdf à quelques degrés près, ce qui valide le montage.
+# En revanche le zéro servo n'est pas au milieu de la course sur l'épaule
+# (+40,9°) ni sur le coude (-49,2°) : c'est voulu par le design, ces deux
+# articulations ayant un débattement utile asymétrique. Ne pas chercher à
+# « corriger » ce décalage, il fait partie de la géométrie du bras.
 LIMITES_DEG = {
-    1: (-110.0, 20.0),    # design ±110°, bridé côté pince du support
-    2: (-100.0, 100.0),
-    3: (-96.8, 96.8),
-    4: (-95.0, 95.0),
-    5: (-157.2, 157.2),
-    6: (-99.0, 12.0),     # mesuré, voir PINCE_* ci-dessous
+    1: (-105.0, 20.0),    # butée réelle à -108,8° ; +20° = pince du support
+    2: (-57.0, 139.0),    # butées réelles -60,7° / +142,5°
+    3: (-143.0, 44.0),    # butées réelles -146,2° / +47,7°
+    4: (-94.0, 92.0),     # butées réelles -97,7° / +95,9°
+    5: (-165.0, 156.0),   # butées réelles -168,0° / +159,3°
+    6: (-95.0, 15.0),     # butées réelles -98,1° / +18,0°
 }
 
 # Pince, mesuré sur le bras monté le 1er août 2026 (commande `course`) :
@@ -56,15 +60,14 @@ LIMITES_DEG = {
 # -98,8° est une vraie butée mécanique, mors contre mors : la charge y monte à
 # 124 ‰ et l'axe cesse d'avancer. C'est le zéro naturel de la pince.
 #
-# Côté ouverture en revanche, aucune butée n'a été rencontrée jusqu'à +14,9°,
-# où la charge restait à 68 ‰. La course mécanique dépasse donc les 110° que
-# déclare l'URDF. On s'en tient à la plage du design plutôt qu'au maximum
-# physique : rien ne justifie d'écarter les mors au-delà.
+# La butée d'ouverture est à +18,0°, relevée à la main : la recherche au moteur
+# ne l'avait pas trouvée, elle s'était arrêtée sur la limite logicielle d'alors.
+# La course totale fait donc 116°, soit 5° de plus que ce que déclare l'URDF.
 #
 # Pour saisir un objet, viser PINCE_FERMEE et laisser le servo caler dessus :
 # c'est la charge qui fait la prise, pas la position atteinte.
-PINCE_FERMEE = -97.0    # 1,8° avant la butée, pour ne pas forcer en permanence
-PINCE_OUVERTE = 10.0    # limite du design URDF, largement avant la fin de course
+PINCE_FERMEE = -96.0    # 2° avant la butée, pour ne pas forcer en permanence
+PINCE_OUVERTE = 15.0    # 3° avant la butée d'ouverture mesurée à +18,0°
 
 CHARGE_MAX = 400  # pour-mille du couple maxi : seuil d'arrêt sur obstacle
 PAS_INCREMENT = 10.0  # amplitude d'un palier, en degrés
@@ -372,6 +375,87 @@ def cmd_course(bus, args):
     return 0
 
 
+def cmd_calibrer(bus, args):
+    """Enregistre les butées réelles pendant que l'opérateur bouge le bras à la main.
+
+    Plus fiable que de chercher les butées au moteur : la main sent la butée
+    avant de forcer, et surtout elle sait distinguer une vraie fin de course
+    d'une collision avec la table ou avec une autre pièce du bras.
+    """
+    presents = bus.scanner()
+    if not presents:
+        print("Aucun servo ne répond.")
+        return 1
+
+    for sid in presents:
+        bus.couple(sid, False)
+    print(f"Couple coupé sur {len(presents)} axes : le bras se manipule "
+          "librement.\n")
+    print(f"Bougez chaque articulation d'une butée à l'autre pendant "
+          f"{args.duree:.0f} secondes.")
+    print("Tenez le bras pour qu'il ne retombe pas d'un coup.\n")
+
+    releves = {}
+    for sid in presents:
+        angle = pas_en_degres(bus.etat(sid)["position"])
+        releves[sid] = {"min": angle, "max": angle}
+
+    debut = time.monotonic()
+    dernier_affichage = 0.0
+    lectures = 0
+    while True:
+        ecoule = time.monotonic() - debut
+        if ecoule >= args.duree:
+            break
+        for sid in presents:
+            try:
+                angle = pas_en_degres(bus.lire(sid, ADR_POS, 2))
+            except ErreurServo:
+                continue  # lecture perdue : sans importance, on rééchantillonne
+            releves[sid]["min"] = min(releves[sid]["min"], angle)
+            releves[sid]["max"] = max(releves[sid]["max"], angle)
+        lectures += 1
+
+        if ecoule - dernier_affichage >= 3.0:
+            dernier_affichage = ecoule
+            etendues = "  ".join(
+                f"{sid}:{releves[sid]['max'] - releves[sid]['min']:>5.0f}°"
+                for sid in presents)
+            restant = args.duree - ecoule
+            print(f"  [{restant:>3.0f}s restantes]  amplitudes  {etendues}",
+                  flush=True)
+
+    print(f"\n{lectures} relevés par axe.\n")
+    print(f"{'id':>2}  {'nom':<14} {'min':>9} {'max':>9} {'amplitude':>10}"
+          f"   {'config':>9}")
+    resultat = {}
+    for sid in presents:
+        bas, haut = releves[sid]["min"], releves[sid]["max"]
+        amplitude = haut - bas
+        # Rappel de l'amplitude actuellement autorisée par LIMITES_DEG, pour
+        # voir d'un coup d'oeil si la mesure deborde de ce qui est configure.
+        config = LIMITES_DEG.get(sid)
+        ref = f"{config[1] - config[0]:.0f}°" if config else "?"
+        print(f"{sid:>2}  {NOMS_ARM101.get(sid, '?'):<14} {bas:>+8.1f}° "
+              f"{haut:>+8.1f}° {amplitude:>9.1f}°   {ref:>9}")
+        resultat[str(sid)] = {"nom": NOMS_ARM101.get(sid), "min_deg": round(bas, 2),
+                              "max_deg": round(haut, 2),
+                              "amplitude_deg": round(amplitude, 2)}
+
+    maigres = [sid for sid in presents
+               if releves[sid]["max"] - releves[sid]["min"] < 20]
+    if maigres:
+        noms = ", ".join(f"{sid} ({NOMS_ARM101.get(sid)})" for sid in maigres)
+        print(f"\nAxes à peine bougés, mesure peu fiable : {noms}")
+
+    chemin = args.sortie
+    with open(chemin, "w", encoding="utf-8") as fichier:
+        json.dump({"date": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "axes": resultat}, fichier, indent=2, ensure_ascii=False)
+    print(f"\nEnregistré dans {chemin}")
+    return 0
+
+
 def cmd_tenir(bus, args):
     """Engage le couple là où le bras se trouve, sans aucun mouvement."""
     cibles = [args.id] if args.id is not None else bus.scanner()
@@ -449,6 +533,13 @@ def construire_parseur():
     p.add_argument("--charge-max", type=int, default=200,
                    help="seuil de détection de butée (défaut 200 ‰)")
     p.set_defaults(fonction=cmd_course)
+
+    p = sous.add_parser("calibrer",
+                        help="enregistre les butées en bougeant le bras à la main")
+    p.add_argument("--duree", type=float, default=90.0,
+                   help="durée d'enregistrement en secondes (défaut 90)")
+    p.add_argument("--sortie", default="calibration.json")
+    p.set_defaults(fonction=cmd_calibrer)
 
     p = sous.add_parser("tenir", help="engage le couple sans bouger")
     p.add_argument("id", type=int, nargs="?")
