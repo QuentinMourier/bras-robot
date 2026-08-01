@@ -48,8 +48,23 @@ LIMITES_DEG = {
     3: (-96.8, 96.8),
     4: (-95.0, 95.0),
     5: (-157.2, 157.2),
-    6: (-100.0, 10.0),    # sens présumé inversé par rapport à l'URDF
+    6: (-99.0, 12.0),     # mesuré, voir PINCE_* ci-dessous
 }
+
+# Pince, mesuré sur le bras monté le 1er août 2026 (commande `course`) :
+#
+# -98,8° est une vraie butée mécanique, mors contre mors : la charge y monte à
+# 124 ‰ et l'axe cesse d'avancer. C'est le zéro naturel de la pince.
+#
+# Côté ouverture en revanche, aucune butée n'a été rencontrée jusqu'à +14,9°,
+# où la charge restait à 68 ‰. La course mécanique dépasse donc les 110° que
+# déclare l'URDF. On s'en tient à la plage du design plutôt qu'au maximum
+# physique : rien ne justifie d'écarter les mors au-delà.
+#
+# Pour saisir un objet, viser PINCE_FERMEE et laisser le servo caler dessus :
+# c'est la charge qui fait la prise, pas la position atteinte.
+PINCE_FERMEE = -97.0    # 1,8° avant la butée, pour ne pas forcer en permanence
+PINCE_OUVERTE = 10.0    # limite du design URDF, largement avant la fin de course
 
 CHARGE_MAX = 400  # pour-mille du couple maxi : seuil d'arrêt sur obstacle
 PAS_INCREMENT = 10.0  # amplitude d'un palier, en degrés
@@ -299,6 +314,64 @@ def cmd_axe(bus, args):
     return 0
 
 
+def _chercher_butee(bus, sid, vers, args):
+    """Avance par paliers vers `vers` jusqu'à sentir une butée.
+
+    Retourne (angle atteint, butée touchée). L'arrêt vient soit de la charge
+    qui dépasse le seuil, soit de l'axe qui cesse d'avancer.
+    """
+    courant = pas_en_degres(bus.etat(sid)["position"])
+    while abs(vers - courant) > 0.5:
+        avance = min(PAS_INCREMENT, abs(vers - courant))
+        prochain = courant + (avance if vers > courant else -avance)
+        atteint, pic, obstacle = bus.aller_a_surveille(
+            sid, degres_en_pas(prochain), vitesse=args.vitesse,
+            accel=args.accel, charge_max=args.charge_max)
+        reel = pas_en_degres(atteint)
+        print(f"    {reel:+7.1f}°  charge {pic:>4}")
+
+        if obstacle:
+            return reel, True
+        if abs(reel - courant) < 0.5:  # n'avance plus sans déclencher le seuil
+            return reel, True
+        courant = reel
+    return courant, False
+
+
+def cmd_course(bus, args):
+    """Mesure la course réelle d'un axe en effleurant ses deux butées.
+
+    À réserver aux axes qui peuvent toucher leur butée sans dommage : la pince
+    typiquement. Sur les axes qui portent le bras, une butée « mécanique » peut
+    en réalité être la table ou une autre pièce du robot.
+    """
+    bas, haut = LIMITES_DEG.get(args.id, (-160.0, 160.0))
+    nom = NOMS_ARM101.get(args.id, "?")
+    depart = pas_en_degres(bus.tenir(args.id, vitesse=args.vitesse,
+                                     accel=args.accel))
+    print(f"Axe {args.id} ({nom}) : départ {depart:+.1f}°, "
+          f"exploration entre {bas:+.0f}° et {haut:+.0f}°, "
+          f"seuil de charge {args.charge_max} ‰\n")
+
+    print(f"  vers le positif (jusqu'à {haut:+.0f}°) :")
+    maxi, butee_haute = _chercher_butee(bus, args.id, haut, args)
+    print(f"  vers le négatif (jusqu'à {bas:+.0f}°) :")
+    mini, butee_basse = _chercher_butee(bus, args.id, bas, args)
+
+    print(f"\nCourse mesurée : {mini:+.1f}° à {maxi:+.1f}° "
+          f"(amplitude {maxi - mini:.1f}°)")
+    print(f"  extrémité positive : "
+          f"{'butée mécanique' if butee_haute else 'limite logicielle'}")
+    print(f"  extrémité négative : "
+          f"{'butée mécanique' if butee_basse else 'limite logicielle'}")
+
+    milieu = (mini + maxi) / 2
+    print(f"\nRetour au milieu de la course ({milieu:+.1f}°)...")
+    bus.aller_a_surveille(args.id, degres_en_pas(milieu), vitesse=args.vitesse,
+                          accel=args.accel, charge_max=args.charge_max)
+    return 0
+
+
 def cmd_tenir(bus, args):
     """Engage le couple là où le bras se trouve, sans aucun mouvement."""
     cibles = [args.id] if args.id is not None else bus.scanner()
@@ -370,6 +443,12 @@ def construire_parseur():
     p.add_argument("--charge-max", type=int, default=CHARGE_MAX,
                    help=f"seuil d'arrêt sur obstacle (défaut {CHARGE_MAX} ‰)")
     p.set_defaults(fonction=cmd_axe)
+
+    p = sous.add_parser("course", help="mesure la course réelle d'un axe")
+    p.add_argument("id", type=int)
+    p.add_argument("--charge-max", type=int, default=200,
+                   help="seuil de détection de butée (défaut 200 ‰)")
+    p.set_defaults(fonction=cmd_course)
 
     p = sous.add_parser("tenir", help="engage le couple sans bouger")
     p.add_argument("id", type=int, nargs="?")
