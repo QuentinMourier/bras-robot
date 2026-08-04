@@ -23,6 +23,10 @@ import json
 import sys
 import time
 
+# Les butées mesurées, les noms d'axes et les positions de la pince vivent dans
+# etalonnage.py : c'est le même étalonnage qui sert ici et au back-end
+# materiel/servos.py, il n'existe qu'en un seul exemplaire.
+from etalonnage import LIMITES_DEG, NOMS_ARM101, limiter  # noqa: F401
 from sts3215 import (BAUDS, CENTRE, ADR_ANGLE_MAX, ADR_ANGLE_MIN, ADR_MODE,
                      ADR_OFFSET, ADR_POS, BusServos, ErreurServo,
                      degres_en_pas, pas_en_degres)
@@ -30,56 +34,10 @@ from sts3215 import (BAUDS, CENTRE, ADR_ANGLE_MAX, ADR_ANGLE_MIN, ADR_MODE,
 PORT_DEFAUT = "/dev/ttyACM0"
 BAUD_DEFAUT = 1_000_000
 
-NOMS_ARM101 = {1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
-               4: "wrist_flex", 5: "wrist_roll", 6: "gripper"}
 MODES = {0: "position", 1: "roue libre", 2: "PWM", 3: "pas à pas"}
-
-# Plages autorisées, en degrés servo autour du centre (2048 pas).
-#
-# Mesurées à la main le 1er août 2026 sur le bras monté (commande `calibrer`,
-# 20 000 relevés par axe, résultats bruts dans calibration.json), puis rentrées
-# 3° en deçà des butées réelles pour ne jamais venir taper dedans.
-#
-# Les amplitudes obtenues correspondent toutes au design de
-# urdf/so101_new_calib.urdf à quelques degrés près, ce qui valide le montage.
-# En revanche le zéro servo n'est pas au milieu de la course sur l'épaule
-# (+40,9°) ni sur le coude (-49,2°) : c'est voulu par le design, ces deux
-# articulations ayant un débattement utile asymétrique. Ne pas chercher à
-# « corriger » ce décalage, il fait partie de la géométrie du bras.
-LIMITES_DEG = {
-    1: (-105.0, 20.0),    # butée réelle à -108,8° ; +20° = pince du support
-    2: (-57.0, 139.0),    # butées réelles -60,7° / +142,5°
-    3: (-143.0, 44.0),    # butées réelles -146,2° / +47,7°
-    4: (-94.0, 92.0),     # butées réelles -97,7° / +95,9°
-    5: (-165.0, 156.0),   # butées réelles -168,0° / +159,3°
-    6: (-95.0, 15.0),     # butées réelles -98,1° / +18,0°
-}
-
-# Pince, mesuré sur le bras monté le 1er août 2026 (commande `course`) :
-#
-# -98,8° est une vraie butée mécanique, mors contre mors : la charge y monte à
-# 124 ‰ et l'axe cesse d'avancer. C'est le zéro naturel de la pince.
-#
-# La butée d'ouverture est à +18,0°, relevée à la main : la recherche au moteur
-# ne l'avait pas trouvée, elle s'était arrêtée sur la limite logicielle d'alors.
-# La course totale fait donc 116°, soit 5° de plus que ce que déclare l'URDF.
-#
-# Pour saisir un objet, viser PINCE_FERMEE et laisser le servo caler dessus :
-# c'est la charge qui fait la prise, pas la position atteinte.
-PINCE_FERMEE = -96.0    # 2° avant la butée, pour ne pas forcer en permanence
-PINCE_OUVERTE = 15.0    # 3° avant la butée d'ouverture mesurée à +18,0°
 
 CHARGE_MAX = 400  # pour-mille du couple maxi : seuil d'arrêt sur obstacle
 PAS_INCREMENT = 10.0  # amplitude d'un palier, en degrés
-
-
-def limiter(sid, degres):
-    """Ramène un angle dans la plage autorisée. Retourne (angle, bridé)."""
-    if sid not in LIMITES_DEG:
-        return degres, False
-    bas, haut = LIMITES_DEG[sid]
-    borne = max(bas, min(haut, degres))
-    return borne, borne != degres
 
 
 def cmd_scan(bus, args):
