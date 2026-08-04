@@ -8,9 +8,29 @@ Ce module ne dépend que de pyserial, volontairement : il sert à diagnostiquer
 le matériel avant même d'installer le SDK Feetech ou LeRobot.
 """
 
+import os
 import time
 
 import serial
+
+# --- Arrêt d'urgence ---
+#
+# Un mouvement en cours ne peut pas être stoppé en ouvrant une deuxième fois le
+# bus : deux processus qui émettent en même temps sur une liaison demi-duplex se
+# brouillent mutuellement. On passe donc par un simple fichier témoin, que
+# toutes les boucles de surveillance relisent : depuis n'importe quelle session,
+#
+#     touch /tmp/bras-stop
+#
+# fige le bras là où il est (couple maintenu, il ne retombe pas) et fait échouer
+# le mouvement en cours. Tant que le fichier existe, aucun mouvement ne démarre ;
+# `rm /tmp/bras-stop` réarme.
+FICHIER_STOP = "/tmp/bras-stop"
+
+
+def arret_demande() -> bool:
+    """Vrai si un arrêt d'urgence a été demandé (fichier FICHIER_STOP présent)."""
+    return os.path.exists(FICHIER_STOP)
 
 # --- Instructions du protocole ---
 PING = 0x01
@@ -55,6 +75,14 @@ ERREURS = [(0x01, "tension"), (0x02, "angle"), (0x04, "surchauffe"),
 
 class ErreurServo(Exception):
     """Communication impossible ou réponse invalide."""
+
+
+class ArretDemande(ErreurServo):
+    """Un arrêt d'urgence a été demandé pendant un mouvement (voir FICHIER_STOP).
+
+    Hérite d'ErreurServo pour que les outils qui rattrapent déjà les erreurs de
+    communication l'affichent proprement au lieu d'une trace d'exception.
+    """
 
 
 def decrit_erreur(code: int) -> str:
@@ -207,6 +235,14 @@ class BusServos:
             "baud": BAUDS.get(self.lire(sid, ADR_BAUD, 1), "?"),
         }
 
+    def charge(self, sid: int) -> int:
+        """Charge instantanée d'un servo, en pour-mille du couple maxi (signée).
+
+        Lecture d'un seul registre, contrairement à etat() : c'est la grandeur
+        qu'on relit en boucle pendant un mouvement pour détecter un obstacle.
+        """
+        return _signe(self.lire(sid, ADR_CHARGE, 2), bit_signe=10)
+
     def couple(self, sid: int, actif: bool) -> None:
         """Active ou coupe le maintien en position (couple moteur)."""
         self.ecrire(sid, ADR_COUPLE, 1 if actif else 0)
@@ -258,8 +294,14 @@ class BusServos:
         while time.monotonic() < fin:
             time.sleep(0.05)
             actuelle = self.lire(sid, ADR_POS, 2)
-            charge = abs(_signe(self.lire(sid, ADR_CHARGE, 2), bit_signe=10))
+            charge = abs(self.charge(sid))
             pic = max(pic, charge)
+
+            if arret_demande():
+                self.ecrire(sid, ADR_POS_CIBLE, actuelle, 2)
+                raise ArretDemande(
+                    f"arrêt demandé ({FICHIER_STOP}) : axe {sid} figé à "
+                    f"{pas_en_degres(actuelle):+.1f}°")
 
             if charge > charge_max:
                 self.ecrire(sid, ADR_POS_CIBLE, actuelle, 2)
@@ -275,6 +317,8 @@ class BusServos:
             precedente = actuelle
         return precedente, pic, False
 
+    STABLES_POUR_ARRET = 8  # relevés consécutifs immobiles, soit 0,4 s
+
     def attendre_arret(self, sid: int, delai_max=8.0) -> int:
         """Attend la fin du mouvement et retourne la position atteinte.
 
@@ -282,6 +326,12 @@ class BusServos:
         encore 0 pendant les quelques millisecondes qui séparent l'envoi de la
         consigne du démarrage effectif, ce qui ferait croire à un arrêt
         immédiat. On exige donc en plus que la position ait cessé de bouger.
+
+        Cette immobilité est exigée sur 0,4 s et non sur 150 ms comme
+        auparavant : la pince marque un temps d'arrêt en cours de fermeture,
+        assez long pour être pris pour une arrivée. La fermeture s'annonçait
+        alors terminée 26° trop tôt, et sur une charge élevée — donc à tort
+        « objet tenu ».
         """
         fin = time.monotonic() + delai_max
         precedente = self.lire(sid, ADR_POS, 2)
@@ -289,10 +339,15 @@ class BusServos:
         while time.monotonic() < fin:
             time.sleep(0.05)
             position = self.lire(sid, ADR_POS, 2)
+            if arret_demande():
+                self.ecrire(sid, ADR_POS_CIBLE, position, 2)
+                raise ArretDemande(
+                    f"arrêt demandé ({FICHIER_STOP}) : axe {sid} figé à "
+                    f"{pas_en_degres(position):+.1f}°")
             bouge = self.lire(sid, ADR_EN_MOUVEMENT, 1)
             if not bouge and abs(position - precedente) <= 2:
                 stables += 1
-                if stables >= 3:
+                if stables >= self.STABLES_POUR_ARRET:
                     return position
             else:
                 stables = 0
