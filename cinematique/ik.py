@@ -34,6 +34,26 @@ SEUIL_ARRET_ANTICIPE_M = 0.001  # 1 mm : au-delà, pas la peine d'essayer un aut
 _rng = np.random.default_rng()
 
 
+def _borner(angles):
+    """Ramène un vecteur d'angles dans les butées déclarées par l'URDF.
+
+    La position réelle du bras peut les dépasser de un ou deux degrés : les
+    courses mesurées à la main sur le bras monté sont un peu plus larges que
+    celles du modèle (l'épaule va jusqu'à 101,6° pour 100° déclarés). Or
+    scipy refuse un point de départ hors bornes. Comme ce n'est qu'un point de
+    départ d'optimisation, le ramener dans les bornes est sans conséquence.
+    """
+    bornes = []
+    for angle, link in zip(angles, bras.links):
+        bas, haut = link.bounds
+        if bas is not None:
+            angle = max(bas, angle)
+        if haut is not None:
+            angle = min(haut, angle)
+        bornes.append(angle)
+    return np.array(bornes)
+
+
 def _points_de_depart(angles_initiaux):
     """Construit la liste des vecteurs de départ à essayer pour l'IK, dans l'ordre :
     1. les angles initiaux fournis par l'appelant (souvent la position actuelle du
@@ -44,7 +64,7 @@ def _points_de_depart(angles_initiaux):
     """
     departs = []
     if angles_initiaux is not None:
-        departs.append(np.array(angles_initiaux, dtype=float))
+        departs.append(_borner(np.array(angles_initiaux, dtype=float)))
     departs.append(np.zeros(len(bras.links)))
     while len(departs) < N_ESSAIS_MULTI_DEPART:
         tirage = [0.0]
