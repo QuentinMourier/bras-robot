@@ -73,7 +73,24 @@ TOUS_LES_AXES = AXES_BRAS + (AXE_PINCE,)
 #
 # Ces limites-là font foi, pas celles de l'URDF, beaucoup trop larges.
 LIMITES_DEG = {
-    1: (-105.0, 20.0),    # butée réelle à -108,8° ; +20° = pince du support
+    # Axe 1 re-mesuré le 20 septembre 2026, après déplacement et re-serrage du
+    # bras sur son support : la course accessible est passée de
+    # [-108,8 ; +2,2] à [-46,3 ; +69,2], soit la même amplitude (115° contre
+    # 111°) décalée d'environ 65°. Les deux extrémités relevées sont désormais
+    # à l'intérieur de la course interne du bras (±110° d'après l'URDF) : ce
+    # sont donc deux blocages du support, et non des butées du bras lui-même.
+    #
+    # Le zéro, lui, n'a PAS bougé : un décalage du palonnier aurait déplacé le
+    # repère du servo de 65°, ce qui se serait vu à l'œil. Vérifié le 20
+    # septembre en amenant l'axe à +1,4° (soit l'angle URDF zéro d'après
+    # MILIEU_MESURE_DEG) : le bras pointe bien droit devant. D'où deux chiffres
+    # de statuts différents pour cet axe — la butée change avec le support, le
+    # zéro non.
+    #
+    # PROVISOIRE : le bras n'est pas encore fixé à demeure (pas de platine de
+    # montage au 20 septembre 2026). Ces deux valeurs dépendent de l'endroit
+    # où le support serre la base : à refaire après la fixation définitive.
+    1: (-43.0, 66.0),     # 3° en deçà des blocages relevés (-46,3 / +69,2)
     2: (-57.0, 139.0),    # butées réelles -60,7° / +142,5°
     3: (-143.0, 44.0),    # butées réelles -146,2° / +47,7°
     4: (-94.0, 92.0),     # butées réelles -97,7° / +95,9°
@@ -118,21 +135,27 @@ SENS = {1: +1, 2: +1, 3: +1, 4: +1, 5: +1, 6: +1}
 # différente de celle calculée, tout en restant dans les butées.
 SENS_VERIFIES = True
 
-# Les axes 1 (rotation de base) et 5 (roulis) ne sont PAS vérifiés : le test
-# vertical ne les distingue pas, l'un tournant autour de la verticale et l'autre
-# ne déplaçant le point de préhension que de 1,3 cm. Une erreur sur l'un des deux
-# est une erreur de justesse, pas de sûreté : les butées de LIMITES_DEG sont
-# exprimées en degrés servo, donc la protection du support (pince de serrage
-# côté positif de l'axe 1) tient quel que soit le sens retenu.
+# Axe 1 (rotation de base) VÉRIFIÉ le 20 septembre 2026, par la méthode que ce
+# commentaire réclamait : un déplacement latéral commandé, observé à l'œil.
 #
-# Conséquence si l'un des deux est faux : y et -y sont échangés (le bras va du
-# mauvais côté pour une cible latérale), et le roulis de l'outil tourne à
-# l'envers. Sans effet sur une cible dans le plan y = 0.
+# Protocole : `python -m materiel.pilote` sur le bras réel, puis flèche gauche,
+# qui demande +1 cm sur y. Observé : la base tourne dans le sens trigonométrique
+# vu de dessus — soit, pour un opérateur qui fait face au bras, vers sa droite
+# (les côtés s'inversent quand on se fait face : l'opérateur regarde selon -x,
+# donc sa droite est le +y du bras).
 #
-# Pour trancher : regarder le bras pendant un déplacement latéral commandé
-# (`aller` avec un y non nul), ou étalonner la caméra par rapport à la base —
-# ce qu'il faudra faire de toute façon pour la saisie guidée par la vision.
-SENS_LATERAUX_VERIFIES = False
+# C'est exactement ce que prédit le modèle : dans un repère direct avec x vers
+# l'avant et z vers le haut, aller vers +y, c'est tourner dans le sens
+# trigonométrique. Le bras est donc allé là où le modèle l'envoyait, et
+# SENS[1] = +1 est confirmé. y et -y ne sont pas échangés.
+#
+# Axe 5 (roulis du poignet) : toujours pas vérifié par un essai dédié, le test
+# vertical d'août ne le distinguant pas (il ne déplace le point de préhension
+# que de 1,3 cm). Mais c'est devenu sans effet sur le positionnement : depuis la
+# correction du 5 septembre, cinematique/ik.py gèle wrist_roll et ne le commande
+# plus jamais (voir MASQUE_LIENS_ACTIFS). Son sens ne redeviendra une question
+# que le jour où l'on orientera la pince explicitement avant une saisie.
+SENS_LATERAUX_VERIFIES = True
 
 # Position servo, en degrés, à laquelle l'angle URDF vaut zéro.
 ZERO_DEG = {sid: MILIEU_MESURE_DEG[sid] - SENS[sid] * MILIEU_URDF_DEG[sid]

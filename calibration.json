@@ -1,41 +1,48 @@
 {
-  "date": "2026-08-01 13:17:42",
+  "date": "2026-09-20 22:36:30",
+  "note": "Axe 1 re-mesure le 20 septembre 2026 apres deplacement et re-serrage du bras sur son support. Les axes 2 a 6 conservent le releve du 1er aout 2026 : leurs butees sont internes au bras et le support ne les affecte pas.",
   "axes": {
     "1": {
       "nom": "shoulder_pan",
-      "min_deg": -108.81,
-      "max_deg": 2.2,
-      "amplitude_deg": 111.01
+      "min_deg": -46.32,
+      "max_deg": 69.17,
+      "amplitude_deg": 115.49,
+      "releve": "2026-09-20"
     },
     "2": {
       "nom": "shoulder_lift",
       "min_deg": -60.73,
       "max_deg": 142.47,
-      "amplitude_deg": 203.2
+      "amplitude_deg": 203.2,
+      "releve": "2026-08-01"
     },
     "3": {
       "nom": "elbow_flex",
       "min_deg": -146.16,
       "max_deg": 47.72,
-      "amplitude_deg": 193.89
+      "amplitude_deg": 193.89,
+      "releve": "2026-08-01"
     },
     "4": {
       "nom": "wrist_flex",
       "min_deg": -97.65,
       "max_deg": 95.89,
-      "amplitude_deg": 193.54
+      "amplitude_deg": 193.54,
+      "releve": "2026-08-01"
     },
     "5": {
       "nom": "wrist_roll",
       "min_deg": -167.96,
       "max_deg": 159.26,
-      "amplitude_deg": 327.22
+      "amplitude_deg": 327.22,
+      "releve": "2026-08-01"
     },
     "6": {
       "nom": "gripper",
       "min_deg": -98.09,
       "max_deg": 18.02,
-      "amplitude_deg": 116.1
+      "amplitude_deg": 116.1,
+      "releve": "2026-08-01"
     }
   }
 }
