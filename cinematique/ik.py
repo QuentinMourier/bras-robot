@@ -4,6 +4,7 @@ La géométrie exacte vient de urdf/so101_new_calib.urdf, chargée par ikpy
 (remplace l'ancienne approximation manuelle, cf. project_bras_robot_cinematique).
 """
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -14,13 +15,58 @@ URDF_PATH = Path(__file__).parent.parent / "urdf" / "so101_new_calib.urdf"
 # ikpy suit automatiquement la branche gripper_frame_joint (point de préhension)
 # plutôt que la branche "gripper" (mâchoire mobile) : c'est la bonne chaîne pour
 # le positionnement, la mâchoire étant pilotée séparément (voir materiel/interface.py).
-bras = Chain.from_urdf_file(str(URDF_PATH))
+#
+# Le chargement émet trois avertissements à chaque import, examinés et sans
+# conséquence ici :
+#   - « Joint gripper_frame_joint ... has an 'axis' attribute » : l'URDF officiel
+#     déclare un axe sur un joint fixe, ce qui est hors spec ; ikpy l'ignore, et
+#     c'est bien ce qu'on veut d'un joint fixe.
+#   - « Link Base link / gripper_frame_joint ... set as active » : ikpy part d'un
+#     masque où tout est actif, y compris ces deux liens fixes. On le remplace
+#     juste en dessous par MASQUE_LIENS_ACTIFS, qui les désactive.
+# On les tait ici plutôt qu'au lancement de chaque outil : les masquer au plus
+# près de leur cause évite de cacher au passage des avertissements utiles.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning, module="ikpy")
+    bras = Chain.from_urdf_file(str(URDF_PATH))
 
 # Les deux liens fixes (origine + point de préhension) ne sont pas des degrés de
 # liberté : on les exclut des angles à faire varier pendant l'IK.
 MASQUE_LIENS_ACTIFS = [
     False if link.joint_type == "fixed" else True for link in bras.links
 ]
+
+# Le roulis du poignet est retiré de l'optimisation, bien qu'il soit un vrai
+# degré de liberté.
+#
+# Motif : la cible d'une IK est ici un point (x, y, z), sans orientation. Or
+# wrist_roll tourne l'outil autour de son propre axe et ne déplace le point de
+# préhension que de ~1 cm : pour l'optimiseur, c'est un paramètre quasi libre,
+# qu'il fixe donc arbitrairement. Mesuré le 5 septembre 2026 : trois cibles
+# distantes de 1 cm donnent +161,5°, +55,9° et +160,8° de roulis, toutes à
+# 0,00 mm de la cible. Le résultat est juste, mais le poignet fait un demi-tour
+# entre deux points voisins.
+#
+# Conséquence concrète : `BrasServos.aller_angles` refusait la plupart des
+# mouvements, l'écart sur l'axe 5 dépassant les ECART_MAX_DEG autorisés — le
+# garde-fou faisait son travail, mais sur un symptôme.
+#
+# En le gelant, les cibles ci-dessus repassent à 0,00 mm d'erreur avec des
+# écarts articulaires de 4 à 25°, sans changer de configuration. Les 4 axes
+# restants suffisent largement à atteindre un point de l'espace.
+#
+# Le roulis n'est pas perdu pour autant : ikpy conserve la valeur fournie dans
+# `initial_position`, donc il garde celle du bras et reste pilotable
+# explicitement — comme la pince, déjà commandée à part du positionnement.
+# C'est d'ailleurs par là qu'il faudra passer pour orienter la pince avant une
+# saisie.
+#
+# (L'alternative essayée, `regularization_parameter`, a été écartée : elle coûte
+# 18 à 27 mm de précision à 0,01, et jusqu'à 273 mm à 0,1, sans même stabiliser
+# le roulis.)
+INDICE_WRIST_ROLL = [l.name for l in bras.links].index("wrist_roll")
+MASQUE_LIENS_ACTIFS[INDICE_WRIST_ROLL] = False
+
 bras.active_links_mask = MASQUE_LIENS_ACTIFS
 
 # ikpy fait de l'optimisation locale : partir toujours d'angles à zéro peut
@@ -73,6 +119,20 @@ def _points_de_depart(angles_initiaux):
             tirage.append(_rng.uniform(bas, haut))
         tirage.append(0.0)
         departs.append(np.array(tirage))
+
+    # wrist_roll étant gelé (voir MASQUE_LIENS_ACTIFS), ikpy ne l'optimise plus
+    # mais recopie tel quel ce que contient le point de départ. Or les départs
+    # ci-dessus lui donnent une valeur aléatoire, et le départ à zéro lui donne
+    # zéro : sans cette correction, on remplacerait un roulis arbitraire choisi
+    # par l'optimiseur par un roulis arbitraire choisi au tirage — voire on
+    # ramènerait le poignet à zéro à chaque mouvement.
+    #
+    # On impose donc à tous les départs le roulis actuel du bras : l'IK le
+    # laisse alors strictement où il est.
+    roulis = (float(angles_initiaux[INDICE_WRIST_ROLL])
+              if angles_initiaux is not None else 0.0)
+    for depart in departs:
+        depart[INDICE_WRIST_ROLL] = roulis
     return departs
 
 

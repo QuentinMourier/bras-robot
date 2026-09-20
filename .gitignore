@@ -4,3 +4,5 @@ __pycache__/
 *.pt
 yolo*_ncnn_model/
 *.onnx
+*.png
+*.gif

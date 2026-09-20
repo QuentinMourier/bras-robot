@@ -13,6 +13,19 @@ inverse et par toutes les sécurités de materiel/servos.py.
     venv/bin/python -m materiel.test_bras aller 0.20 0.05 0.15
     venv/bin/python -m materiel.test_bras pince ouvrir
 
+Toutes ces commandes acceptent --simu, qui pilote le bras simulé de
+materiel/simulation.py au lieu des servos : aucun matériel n'est requis, et les
+mêmes sécurités s'appliquent. Les options générales se placent avant la
+commande :
+
+    venv/bin/python -m materiel.test_bras --simu etat
+    venv/bin/python -m materiel.test_bras --simu --vue trajet.png aller 0.30 0.05 0.15
+    venv/bin/python -m materiel.test_bras --simu --temps-reel aller 0.30 0.05 0.15
+
+Attention : la simulation ne connaît ni la gravité ni les contacts. Elle valide
+la géométrie et la logique, pas la sûreté physique — voir l'en-tête de
+materiel/simulation.py.
+
 Pour arrêter un mouvement en cours, depuis n'importe où :
 
     ssh pi touch /tmp/bras-stop     # fige le bras, couple maintenu
@@ -36,6 +49,7 @@ from materiel.etalonnage import (AXES_BRAS, AXE_PINCE, LIMITES_DEG,
                                  limiter)
 from materiel.servos import (BAUD_DEFAUT, ECART_MAX_DEG, PORT_DEFAUT,
                              BrasServos)
+from materiel.simulation import BrasSimule
 from materiel.sts3215 import ErreurServo
 
 
@@ -169,6 +183,14 @@ def construire_parseur():
     parseur.add_argument("--baud", type=int, default=BAUD_DEFAUT)
     parseur.add_argument("--vitesse", type=int, default=None,
                          help="vitesse des servos en pas/s")
+    parseur.add_argument("--simu", action="store_true",
+                         help="pilote le bras simulé au lieu du bras réel "
+                              "(aucun matériel requis)")
+    parseur.add_argument("--temps-reel", action="store_true",
+                         help="avec --simu : fait durer le mouvement aussi "
+                              "longtemps que sur le bras réel")
+    parseur.add_argument("--vue", metavar="FICHIER.png", default=None,
+                         help="avec --simu : écrit le tracé 3D du trajet")
     sous = parseur.add_subparsers(dest="commande", required=True)
 
     p = sous.add_parser("etat", help="position actuelle, servo et cartésienne")
@@ -210,15 +232,25 @@ def main():
     if args.commande in ("monter", "etat", "essai"):
         options["accepter_sens_non_verifies"] = True
 
+    if args.simu:
+        constructeur = lambda: BrasSimule(temps_reel=args.temps_reel, **options)
+    else:
+        constructeur = lambda: BrasServos(args.port, args.baud, **options)
+
     try:
-        with BrasServos(args.port, args.baud, **options) as bras:
+        with constructeur() as bras:
             try:
-                return args.fonction(bras, args)
+                code = args.fonction(bras, args)
             except KeyboardInterrupt:
                 # Un Ctrl-C en plein mouvement laisserait les servos rejoindre
                 # leur dernière consigne : on les fige explicitement.
                 bras.stop()
                 return 130
+            if args.simu and args.vue:
+                chemin = bras.tracer(args.vue)
+                print(f"\nTracé du trajet ({len(bras.trajectoire)} poses) "
+                      f"écrit dans {chemin}")
+            return code
     except RuntimeError as erreur:
         print(erreur)
         return 1
