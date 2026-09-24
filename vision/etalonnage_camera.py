@@ -133,7 +133,7 @@ def cmd_capturer(args):
     """Promène la pince sur la grille et photographie chaque position."""
     import cv2
 
-    from materiel.approche import aller_par_etapes
+    from materiel.approche import aller_en_repassant_au_neutre
     from materiel.servos import BrasServos
     from materiel.simulation import BrasSimule
     from vision.camera import Camera
@@ -155,9 +155,11 @@ def cmd_capturer(args):
     try:
         with Camera() as camera:
             for i, (x, y) in enumerate(points):
-                # Par étapes : le premier point est loin de la pose de départ,
-                # et un saut direct serait refusé par la limite d'écart.
-                if not aller_par_etapes(bras, x, y, args.z, bavard=False):
+                # Par étapes, et au besoin en repassant par la pose neutre :
+                # le bras se coince sinon dans des configurations d'où la
+                # cible suivante demanderait de retourner un axe de 150°.
+                if not aller_en_repassant_au_neutre(bras, x, y, args.z,
+                                                    bavard=False):
                     print(f"  {i:>2}. ({x:+.3f}, {y:+.3f}) inatteignable, ignoré")
                     continue
                 time.sleep(DELAI_POSE)
@@ -187,6 +189,83 @@ def cmd_capturer(args):
         encoding="utf-8")
     print(f"\n{len(releves)} photos dans {dossier}/. "
           f"Étape suivante :\n    venv/bin/python -m vision.etalonnage_camera pointer")
+    return 0
+
+
+# ----------------------------------------------------------------------
+# 0. Contrôle du cadrage
+# ----------------------------------------------------------------------
+def cmd_cadrage(args):
+    """Promène la pince aux coins de la zone et en fait une planche-contact.
+
+    À lancer avant `capturer`, et après chaque déplacement de la caméra : rien
+    n'est plus frustrant que de dérouler quinze points pour s'apercevoir à la
+    fin que la pince sortait du champ. Cinq positions suffisent à le voir.
+
+    Les vignettes sont assemblées en une seule image, plus simple à regarder
+    de loin qu'une poignée de fichiers séparés.
+    """
+    import cv2
+
+    from materiel.approche import aller_par_etapes
+    from materiel.servos import BrasServos
+    from materiel.simulation import BrasSimule
+    from vision.camera import Camera
+
+    x0, x1 = args.x[0], args.x[1]
+    y0, y1 = args.y[0], args.y[1]
+    stations = [("avant-gauche", x0, y0), ("avant-droit", x1, y0),
+                ("centre", (x0 + x1) / 2, (y0 + y1) / 2),
+                ("arriere-droit", x1, y1), ("arriere-gauche", x0, y1)]
+
+    bras = BrasSimule(bavard=False) if args.simu else BrasServos(args.port,
+                                                                 bavard=False)
+    vignettes = []
+    try:
+        with Camera() as camera:
+            for nom, x, y in stations:
+                if not aller_par_etapes(bras, x, y, args.z, bavard=False):
+                    print(f"  {nom:<14} ({x:+.2f}, {y:+.2f}) inatteignable")
+                    continue
+                time.sleep(DELAI_POSE)
+                image = camera.capturer()
+                reelle = bras.position_pince()
+                cv2.putText(image, f"{nom}  ({reelle[0]:+.2f}, {reelle[1]:+.2f})",
+                            (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1,
+                            (0, 0, 0), 6)
+                cv2.putText(image, f"{nom}  ({reelle[0]:+.2f}, {reelle[1]:+.2f})",
+                            (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1,
+                            (0, 255, 255), 2)
+                vignettes.append(image)
+                print(f"  {nom:<14} ({reelle[0]:+.3f}, {reelle[1]:+.3f}) photographié")
+    except KeyboardInterrupt:
+        bras.stop()
+        print("\nInterrompu : le bras est figé sur place.")
+    finally:
+        bras.close()
+
+    if not vignettes:
+        print("Aucune position atteinte.")
+        return 1
+
+    # Planche-contact : deux colonnes, demi-résolution.
+    reduites = [cv2.resize(v, (v.shape[1] // 2, v.shape[0] // 2))
+                for v in vignettes]
+    h, l = reduites[0].shape[:2]
+    lignes = []
+    for i in range(0, len(reduites), 2):
+        paire = reduites[i:i + 2]
+        if len(paire) == 1:
+            paire.append(np.zeros_like(reduites[0]))
+        lignes.append(np.hstack(paire))
+    planche = np.vstack(lignes)
+
+    chemin = Path(args.sortie)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(chemin), planche)
+    print(f"\nPlanche-contact ({len(vignettes)} vues) : {chemin}")
+    print("La pince doit être visible ET entière sur chacune, sans toucher "
+          "les bords.")
     return 0
 
 
@@ -351,10 +430,21 @@ def cmd_ajuster(args):
     pixels = np.array([[p["u"], p["v"]] for p in retenus], dtype=np.float64)
     metres = np.array([[p["x"], p["y"]] for p in retenus], dtype=np.float64)
 
-    # Seuil RANSAC exprimé dans l'unité d'arrivée, donc en mètres : un point
-    # dont la reprojection tombe à plus de 8 mm est considéré aberrant (clic
-    # manqué, pince mal identifiée) et écarté de l'ajustement.
-    homographie, masque = cv2.findHomography(pixels, metres, cv2.RANSAC, 0.008)
+    # Seuil RANSAC exprimé dans l'unité d'arrivée, donc en mètres. Il ne doit
+    # écarter que les vraies bévues — un clic sur la mauvaise pièce — et non le
+    # bruit ordinaire du pointage.
+    #
+    # Réglé à 8 mm au premier essai, il écartait 4 points sur 13 du relevé du
+    # 22 septembre. À tort : l'ajustement sur les 9 survivants donnait certes
+    # 3,3 mm sur eux-mêmes, mais 6,3 mm sur les 13, là où l'ajustement gardant
+    # tout donne 5,9 mm. Le seuil trop serré coûtait donc de la justesse sur
+    # l'ensemble de la zone, en plus de laisser un coin sans aucun point.
+    #
+    # 20 mm garde le bruit de pointage et rejette toujours une vraie bévue (un
+    # clic faux de 90 px, éprouvé sur données synthétiques, ressort à 53 mm).
+    SEUIL_ABERRANT_M = 0.020
+    homographie, masque = cv2.findHomography(pixels, metres, cv2.RANSAC,
+                                             SEUIL_ABERRANT_M)
     if homographie is None:
         print("Ajustement impossible : les points sont peut-être alignés. "
               "Reprenez une grille plus étalée.")
@@ -485,6 +575,16 @@ def construire_parseur():
                               "éprouver la mécanique de l'outil, pas pour "
                               "étalonner)")
     sous = parseur.add_subparsers(dest="commande", required=True)
+
+    p = sous.add_parser("cadrage",
+                        help="vérifie que la zone tient dans le champ")
+    p.add_argument("--z", type=float, default=Z_DEFAUT)
+    p.add_argument("--x", type=float, nargs=2, default=X_DEFAUT[:2],
+                   metavar=("DEBUT", "FIN"))
+    p.add_argument("--y", type=float, nargs=2, default=Y_DEFAUT[:2],
+                   metavar=("DEBUT", "FIN"))
+    p.add_argument("--sortie", default="cadrage.jpg")
+    p.set_defaults(fonction=cmd_cadrage)
 
     p = sous.add_parser("capturer", help="parcourt la grille et photographie")
     p.add_argument("--z", type=float, default=Z_DEFAUT,
