@@ -9,6 +9,7 @@ le matériel avant même d'installer le SDK Feetech ou LeRobot.
 """
 
 import os
+import threading
 import time
 
 import serial
@@ -36,6 +37,12 @@ def arret_demande() -> bool:
 PING = 0x01
 READ = 0x02
 WRITE = 0x03
+# Écriture groupée : une seule trame porte les consignes de tous les servos, et
+# aucun ne répond. C'est l'instruction qui permet un mouvement fluide — voir
+# BusServos.ecrire_groupe.
+SYNC_WRITE = 0x83
+
+DIFFUSION = 0xFE  # identifiant réservé : s'adresse à tous, personne ne répond
 
 # --- Table mémoire du STS3215 (adresse du premier octet) ---
 # EPROM (persistant, nécessite le déverrouillage du registre LOCK pour écrire)
@@ -110,6 +117,12 @@ class BusServos:
     def __init__(self, port="/dev/ttyACM0", baud=1_000_000, timeout=0.05):
         self.ser = serial.Serial(port, baud, timeout=timeout)
         self.timeout = timeout
+        # Une liaison demi-duplex ne supporte pas deux émetteurs : si deux fils
+        # d'exécution écrivent en même temps, leurs trames s'entrelacent et les
+        # servos ne reconnaissent plus rien. C'est le cas dès qu'une boucle
+        # d'asservissement tourne en fond pendant qu'on commande la pince.
+        # Le verrou sérialise toute transaction, écriture groupée comprise.
+        self._verrou = threading.RLock()
 
     def close(self) -> None:
         self.ser.close()
@@ -132,10 +145,15 @@ class BusServos:
         corps = bytes([sid, len(params) + 2, instruction]) + params
         trame = b"\xff\xff" + corps + bytes([(~sum(corps)) & 0xFF])
 
+        with self._verrou:
+            return self._echanger(sid, trame)
+
+    def _echanger(self, sid: int, trame: bytes):
+        """Émet la trame et lit la réponse. Le verrou est déjà pris."""
         self.ser.reset_input_buffer()
         self.ser.write(trame)
 
-        if sid == 0xFE:  # diffusion générale : aucun servo ne répond
+        if sid == DIFFUSION:  # diffusion générale : aucun servo ne répond
             return None
 
         # Certains adaptateurs half-duplex renvoient un écho de ce qu'on émet ;
@@ -206,8 +224,71 @@ class BusServos:
         else:
             octets = bytes([valeur & 0xFF, (valeur >> 8) & 0xFF])
         reponse = self._transaction(sid, WRITE, bytes([adresse]) + octets)
-        if reponse is None and sid != 0xFE:
+        if reponse is None and sid != DIFFUSION:
             raise ErreurServo(f"écriture non acquittée par le servo {sid}")
+
+    # ------------------------------------------------------------------
+    # Écriture groupée
+    # ------------------------------------------------------------------
+    def ecrire_groupe(self, adresse: int, donnees: dict) -> None:
+        """Écrit d'un coup le même registre sur plusieurs servos (SYNC WRITE).
+
+        `donnees` associe un identifiant de servo aux octets à y écrire, tous
+        de même longueur. La trame vaut :
+
+            FF FF FE <long> 83 <adresse> <n> <id1> <octets1> <id2> <octets2>...
+
+        Pourquoi c'est la clé d'un mouvement fluide : `ecrire` attend un accusé
+        de réception par servo et par registre. Commander cinq axes en position
+        et vitesse coûtait donc quinze allers-retours, soit des dizaines de
+        millisecondes pendant lesquelles les axes partent les uns après les
+        autres. Ici, une trame unique d'une cinquantaine d'octets à 1 Mbaud,
+        sans réponse : les cinq axes reçoivent leur consigne dans la même
+        milliseconde, et démarrent ensemble.
+
+        Aucun accusé n'étant renvoyé, une erreur passe inaperçue : à réserver
+        aux consignes de mouvement, répétées à chaque cycle, jamais à une
+        écriture qu'il faut garantir (identifiant, EPROM, couple).
+        """
+        if not donnees:
+            return
+        tailles = {len(octets) for octets in donnees.values()}
+        if len(tailles) != 1:
+            raise ValueError("SYNC WRITE : tous les servos doivent recevoir "
+                             f"le même nombre d'octets, reçu {sorted(tailles)}")
+
+        taille = tailles.pop()
+        params = bytearray([adresse, taille])
+        for sid, octets in sorted(donnees.items()):
+            params.append(sid)
+            params.extend(octets)
+        self._transaction(DIFFUSION, SYNC_WRITE, bytes(params))
+
+    def positions_groupe(self, cibles: dict) -> None:
+        """Consigne de position pour plusieurs servos, en une trame.
+
+        `cibles` associe un identifiant à une position en pas. Vitesse et
+        accélération ne sont pas touchées : on les règle une fois au départ
+        (voir `preparer_groupe`) et on ne rafraîchit ensuite que la position,
+        ce qui tient en deux octets par servo.
+        """
+        self.ecrire_groupe(ADR_POS_CIBLE, {
+            sid: bytes([pas & 0xFF, (pas >> 8) & 0xFF])
+            for sid, pas in cibles.items()})
+
+    def preparer_groupe(self, sids, vitesse: int, accel: int) -> None:
+        """Règle accélération et vitesse de plusieurs servos, en deux trames.
+
+        À appeler avant une série de `positions_groupe`. Les registres 41
+        (accélération) et 46-47 (vitesse) ne sont pas contigus : on ne peut
+        donc pas les grouper en une seule écriture sans toucher aussi 42-45,
+        qui portent la position cible et le temps de parcours.
+        """
+        self.ecrire_groupe(ADR_ACCEL, {sid: bytes([accel & 0xFF])
+                                       for sid in sids})
+        self.ecrire_groupe(ADR_VITESSE_CIBLE, {
+            sid: bytes([vitesse & 0xFF, (vitesse >> 8) & 0xFF])
+            for sid in sids})
 
     # ------------------------------------------------------------------
     # Confort

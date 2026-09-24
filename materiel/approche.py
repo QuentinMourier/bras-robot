@@ -23,7 +23,18 @@ collisions, pas la géométrie.
 
 import numpy as np
 
+from materiel.etalonnage import (AXES_BRAS, NOMS_ARM101, ZERO_DEG,
+                                 degres_vers_angles)
+
 ETAPES_MAX = 8
+
+# Pose de repli : celle où tous les angles URDF valent zéro, bras tendu vers
+# l'avant. Son intérêt n'est pas son allure mais sa position dans l'espace
+# ARTICULAIRE — chaque axe y est loin de ses butées, donc l'IK lancée de là
+# trouve des solutions franches plutôt que des contorsions.
+POSE_NEUTRE_DEG = {sid: ZERO_DEG[sid] for sid in AXES_BRAS}
+
+PAS_ARTICULAIRE_DEG = 45.0
 
 
 def aller_par_etapes(bras, x: float, y: float, z: float,
@@ -55,3 +66,55 @@ def aller_par_etapes(bras, x: float, y: float, z: float,
         print(f"[approche] cible ({x:+.3f}, {y:+.3f}, {z:+.3f}) m non atteinte "
               f"même en {etapes_max} étapes.")
     return False
+
+
+def aller_angles_par_etapes(bras, cibles_deg: dict,
+                            pas_max_deg: float = PAS_ARTICULAIRE_DEG,
+                            bavard: bool = True) -> bool:
+    """Rejoint des angles donnés en interpolant dans l'espace ARTICULAIRE.
+
+    Aucune cinématique inverse n'intervient : on connaît déjà les angles
+    voulus. Le bras ne peut donc pas changer de configuration en route, ce qui
+    est exactement le défaut que cette fonction sert à contourner.
+
+    Le trajet est coupé en pas de `pas_max_deg` pour rester sous la limite
+    d'écart de `aller_angles`.
+    """
+    depart = bras.degres_servo(AXES_BRAS)
+    ecart = max(abs(cibles_deg[sid] - depart[sid]) for sid in AXES_BRAS)
+    nombre = max(1, int(np.ceil(ecart / pas_max_deg)))
+    if bavard and nombre > 1:
+        print(f"[approche] {ecart:.0f}° à parcourir en articulaire, "
+              f"{nombre} étapes")
+
+    for t in np.linspace(0.0, 1.0, nombre + 1)[1:]:
+        etape = {sid: depart[sid] + (cibles_deg[sid] - depart[sid]) * t
+                 for sid in AXES_BRAS}
+        if not bras.aller_angles(degres_vers_angles(etape)):
+            if bavard:
+                print("[approche] étape articulaire refusée")
+            return False
+    return True
+
+
+def revenir_au_neutre(bras, bavard: bool = True) -> bool:
+    """Ramène le bras à POSE_NEUTRE_DEG, bras tendu et axes loin des butées.
+
+    À utiliser quand une cible est refusée : le bras s'est en général coincé
+    dans un recoin de son espace articulaire, d'où la cible n'est joignable
+    qu'en retournant un axe de 150°. Repartir du neutre remet l'IK en terrain
+    franc.
+    """
+    if bavard:
+        print("[approche] retour à la pose neutre")
+    return aller_angles_par_etapes(bras, POSE_NEUTRE_DEG, bavard=bavard)
+
+
+def aller_en_repassant_au_neutre(bras, x: float, y: float, z: float,
+                                 bavard: bool = True) -> bool:
+    """`aller_par_etapes`, et si cela échoue, réessaie depuis la pose neutre."""
+    if aller_par_etapes(bras, x, y, z, bavard=bavard):
+        return True
+    if not revenir_au_neutre(bras, bavard=bavard):
+        return False
+    return aller_par_etapes(bras, x, y, z, bavard=bavard)
