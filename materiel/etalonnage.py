@@ -87,10 +87,21 @@ LIMITES_DEG = {
     # de statuts différents pour cet axe — la butée change avec le support, le
     # zéro non.
     #
-    # PROVISOIRE : le bras n'est pas encore fixé à demeure (pas de platine de
-    # montage au 20 septembre 2026). Ces deux valeurs dépendent de l'endroit
-    # où le support serre la base : à refaire après la fixation définitive.
-    1: (-43.0, 66.0),     # 3° en deçà des blocages relevés (-46,3 / +69,2)
+    # Révisé le 27 septembre 2026, après fixation définitive du socle dans une
+    # pince. Ces bornes-ci ne sont NI des butées mécaniques NI des blocages du
+    # support : ce sont les limites de l'espace réellement dégagé autour du
+    # bras, relevées à la main (-38,4 / +45,9) et arrondies vers l'intérieur.
+    # Une multiprise d'un côté, les câbles de l'autre, installés à demeure.
+    #
+    # La distinction compte pour la suite : un jour où cet encombrement
+    # changera, ces deux valeurs seront à revoir, alors que les butées des
+    # autres axes, elles, sont internes au bras et ne bougeront jamais. Les
+    # obstacles imprévus, eux, restent du ressort de la surveillance de charge.
+    #
+    # Coût sur la zone atteignable, mesuré : le coeur (y de -0,10 à +0,10)
+    # reste accessible à 100 %, les bords latéraux tombent à 43-57 % au-delà
+    # de |y| = 0,20.
+    1: (-38.0, 45.0),
     2: (-57.0, 139.0),    # butées réelles -60,7° / +142,5°
     3: (-143.0, 44.0),    # butées réelles -146,2° / +47,7°
     4: (-94.0, 92.0),     # butées réelles -97,7° / +95,9°

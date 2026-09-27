@@ -59,7 +59,7 @@ from cinematique.jacobienne import (AMORTISSEMENT, AXES_POSITION, _resoudre,
 from materiel.etalonnage import (AXES_BRAS, LIMITES_DEG, NOMS_ARM101,
                                  angles_vers_degres, degres_vers_angles,
                                  limiter)
-from materiel.sts3215 import (ADR_POS, FICHIER_STOP, arret_demande,
+from materiel.sts3215 import (ADR_POS, FICHIER_STOP, RESOLUTION, arret_demande,
                               degres_en_pas, pas_en_degres)
 
 FREQUENCE = 50.0            # Hz, cadence de la boucle
@@ -68,6 +68,8 @@ ACCEL_MAX_DEG_S2 = 240.0    # rampe : 0 a 60 deg/s en un quart de seconde
 CHARGE_MAX = 400            # pour-mille, comme BrasServos
 VITESSE_CART_M_S = 0.15     # m/s, vitesse de la pince dans l'espace
 ACCEL_CART_M_S2 = 0.35      # m/s2, rampe correspondante
+MARGE_VITESSE = 1.35        # le servo vise un peu au-dela du profil
+VITESSE_SERVO_MINI = 8      # pas/s : 0 signifierait « vitesse maximale »
 # La loi de freinage suppose que la décélération demandée est réalisable. Elle
 # ne l'est pas toujours : passée par la jacobienne et amortie, elle se heurte
 # au plafond articulaire. Mesuré en simulation, viser 0,50 m/s2 faisait
@@ -100,9 +102,20 @@ class SortieServos:
         return {sid: pas_en_degres(self.bus.lire(sid, ADR_POS, 2))
                 for sid in AXES_BRAS}
 
-    def ecrire(self, consignes_deg: dict) -> None:
-        self.bus.positions_groupe({sid: degres_en_pas(deg)
-                                   for sid, deg in consignes_deg.items()})
+    def ecrire(self, consignes_deg: dict, vitesses_deg_s: dict = None) -> None:
+        if vitesses_deg_s is None:
+            self.bus.positions_groupe({sid: degres_en_pas(deg)
+                                       for sid, deg in consignes_deg.items()})
+            return
+        # Vitesse servo = vitesse du profil, majoree d'une marge : le servo doit
+        # etre encore en mouvement quand la consigne suivante arrive, sans pour
+        # autant devancer le profil.
+        self.bus.consignes_groupe({
+            sid: (degres_en_pas(deg),
+                  max(VITESSE_SERVO_MINI,
+                      abs(vitesses_deg_s.get(sid, 0.0)) * MARGE_VITESSE
+                      * RESOLUTION / 360.0))
+            for sid, deg in consignes_deg.items()})
 
     def charge(self, sid: int) -> int:
         return self.bus.charge(sid)
@@ -118,7 +131,7 @@ class SortieSimulee:
     def positions(self) -> dict:
         return self.bras.degres_servo(AXES_BRAS)
 
-    def ecrire(self, consignes_deg: dict) -> None:
+    def ecrire(self, consignes_deg: dict, vitesses_deg_s: dict = None) -> None:
         self.bras._degres.update(consignes_deg)
         self.journal.append(dict(consignes_deg))
 
@@ -396,7 +409,7 @@ class Asservissement:
                 self.profil.vitesse[sid] = 0.0    # inutile de pousser la butée
             bornees[sid] = borne
 
-        self.sortie.ecrire(bornees)
+        self.sortie.ecrire(bornees, dict(self.profil.vitesse))
 
         # Surveillance de charge : un axe par cycle, donc chacun toutes les
         # 100 ms à 50 Hz. Les lire tous à chaque cycle coûterait cinq
@@ -406,3 +419,17 @@ class Asservissement:
         if charge > self.charge_max:
             raise Arret(f"charge {charge} pour mille sur l'axe {sid} "
                         f"({NOMS_ARM101[sid]}) — quelque chose bloque")
+
+
+def asservissement_pour(bras, **options) -> Asservissement:
+    """Construit un `Asservissement` adapté au back-end fourni.
+
+    Évite que chaque outil ait à connaître la différence entre un bras réel et
+    un bras simulé : ils passent leur `Bras`, ils reçoivent une boucle prête.
+
+        with asservissement_pour(bras) as asser:
+            aller_asservi(asser, 0.26, -0.05, 0.05)
+    """
+    sortie = SortieSimulee(bras) if hasattr(bras, "_degres") \
+        else SortieServos(bras.bus)
+    return Asservissement(sortie, **options)

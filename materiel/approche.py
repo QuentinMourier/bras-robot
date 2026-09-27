@@ -118,3 +118,46 @@ def aller_en_repassant_au_neutre(bras, x: float, y: float, z: float,
     if not revenir_au_neutre(bras, bavard=bavard):
         return False
     return aller_par_etapes(bras, x, y, z, bavard=bavard)
+
+
+# ----------------------------------------------------------------------
+# Versions asservies : les mêmes déplacements, mais fluides
+# ----------------------------------------------------------------------
+#
+# Tout ce qui précède passe par `Bras.aller_a` et ses paliers de 10 degrés
+# suivis d'une attente d'arrivée, puis d'un rattrapage de biais en fin de
+# course. Observé sur le bras réel le 27 septembre 2026 : ce chemin est
+# visiblement saccadé, là où la boucle d'asservissement, sur le même trajet,
+# est fluide. L'oeil l'a tranché avant l'instrumentation, qui ne regardait
+# qu'un axe et n'avait rien vu.
+#
+# Les fonctions ci-dessous font le même travail à travers un `Asservissement`
+# déjà démarré. À préférer partout où l'on en a un sous la main.
+
+def aller_asservi(asser, x: float, y: float, z: float,
+                  tolerance: float = 0.004, delai: float = 20.0) -> bool:
+    """Rejoint (x, y, z) par la boucle continue. True si la cible est atteinte."""
+    asser.viser(x, y, z)
+    return asser.attendre_arrivee(tolerance=tolerance, delai=delai)
+
+
+def revenir_au_neutre_asservi(asser, delai: float = 20.0,
+                              tolerance_deg: float = 1.5) -> bool:
+    """Ramène le bras à POSE_NEUTRE_DEG par la boucle continue.
+
+    On vise des ANGLES et non un point : la pose neutre est définie dans
+    l'espace articulaire, et y aller par la cinématique inverse rendrait une
+    posture différente pour la même position de pince.
+    """
+    import time
+
+    asser.viser_angles(np.array(degres_vers_angles(POSE_NEUTRE_DEG)))
+    fin = time.monotonic() + delai
+    while time.monotonic() < fin:
+        consigne = asser.etat()["consigne_deg"]
+        ecart = max(abs(consigne[sid] - POSE_NEUTRE_DEG[sid])
+                    for sid in AXES_BRAS)
+        if ecart <= tolerance_deg:
+            return True
+        time.sleep(asser.dt)
+    return False

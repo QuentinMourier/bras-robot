@@ -121,9 +121,17 @@ def cmd_essai(bras, args):
 
 
 def cmd_aller(bras, args):
-    """Déplace le point de préhension vers une position donnée."""
-    if not bras.aller_a(args.x, args.y, args.z):
-        return 1
+    """Déplace le point de préhension vers une position donnée.
+
+    Par la boucle d'asservissement : mouvement continu, sans les paliers
+    suivis d'attente de l'ancien chemin, visiblement saccadés sur le bras réel.
+    """
+    from materiel.approche import aller_asservi
+    from materiel.asservissement import asservissement_pour
+
+    with asservissement_pour(bras) as asser:
+        if not aller_asservi(asser, args.x, args.y, args.z):
+            return 1
     x, y, z = bras.position_pince()
     ecart_mm = np.linalg.norm(np.array([x, y, z]) -
                               np.array([args.x, args.y, args.z])) * 1000
@@ -148,10 +156,14 @@ def cmd_monter(bras, args):
     print(f"Consigne : la même chose {args.cm:.0f} cm plus haut, "
           "sans rien changer d'autre.\n")
 
-    if not bras.aller_a(*cible):
-        print("\nMouvement refusé ou interrompu — voir le message ci-dessus. "
-              "L'étalonnage reste à vérifier.")
-        return 1
+    from materiel.approche import aller_asservi
+    from materiel.asservissement import asservissement_pour
+
+    with asservissement_pour(bras) as asser:
+        if not aller_asservi(asser, *cible):
+            print("\nMouvement refusé ou interrompu — voir le message "
+                  "ci-dessus. L'étalonnage reste à vérifier.")
+            return 1
 
     arrivee = bras.position_pince()
     print(f"\nModèle : la pince est montée de "

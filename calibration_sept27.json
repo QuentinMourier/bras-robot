@@ -1,0 +1,41 @@
+{
+  "date": "2026-09-27 22:59:31",
+  "axes": {
+    "1": {
+      "nom": "shoulder_pan",
+      "min_deg": -38.41,
+      "max_deg": 45.88,
+      "amplitude_deg": 84.29
+    },
+    "2": {
+      "nom": "shoulder_lift",
+      "min_deg": -50.8,
+      "max_deg": 54.4,
+      "amplitude_deg": 105.21
+    },
+    "3": {
+      "nom": "elbow_flex",
+      "min_deg": -69.79,
+      "max_deg": 47.64,
+      "amplitude_deg": 117.42
+    },
+    "4": {
+      "nom": "wrist_flex",
+      "min_deg": 30.32,
+      "max_deg": 53.61,
+      "amplitude_deg": 23.29
+    },
+    "5": {
+      "nom": "wrist_roll",
+      "min_deg": -7.56,
+      "max_deg": -7.03,
+      "amplitude_deg": 0.53
+    },
+    "6": {
+      "nom": "gripper",
+      "min_deg": -95.98,
+      "max_deg": -95.98,
+      "amplitude_deg": 0.0
+    }
+  }
+}

@@ -133,7 +133,8 @@ def cmd_capturer(args):
     """Promène la pince sur la grille et photographie chaque position."""
     import cv2
 
-    from materiel.approche import aller_en_repassant_au_neutre
+    from materiel.approche import aller_asservi, revenir_au_neutre_asservi
+    from materiel.asservissement import asservissement_pour
     from materiel.servos import BrasServos
     from materiel.simulation import BrasSimule
     from vision.camera import Camera
@@ -153,13 +154,14 @@ def cmd_capturer(args):
         else BrasServos(args.port, bavard=False)
     releves = []
     try:
-        with Camera() as camera:
+        with Camera() as camera, asservissement_pour(bras) as asser:
             for i, (x, y) in enumerate(points):
-                # Par étapes, et au besoin en repassant par la pose neutre :
-                # le bras se coince sinon dans des configurations d'où la
-                # cible suivante demanderait de retourner un axe de 150°.
-                if not aller_en_repassant_au_neutre(bras, x, y, args.z,
-                                                    bavard=False):
+                # Boucle continue, et au besoin retour par la pose neutre : le
+                # bras se coince sinon dans des configurations d'où la cible
+                # suivante demanderait de retourner un axe de 150°.
+                if not (aller_asservi(asser, x, y, args.z)
+                        or (revenir_au_neutre_asservi(asser)
+                            and aller_asservi(asser, x, y, args.z))):
                     print(f"  {i:>2}. ({x:+.3f}, {y:+.3f}) inatteignable, ignoré")
                     continue
                 time.sleep(DELAI_POSE)
@@ -207,7 +209,8 @@ def cmd_cadrage(args):
     """
     import cv2
 
-    from materiel.approche import aller_par_etapes
+    from materiel.approche import aller_asservi
+    from materiel.asservissement import asservissement_pour
     from materiel.servos import BrasServos
     from materiel.simulation import BrasSimule
     from vision.camera import Camera
@@ -222,9 +225,9 @@ def cmd_cadrage(args):
                                                                  bavard=False)
     vignettes = []
     try:
-        with Camera() as camera:
+        with Camera() as camera, asservissement_pour(bras) as asser:
             for nom, x, y in stations:
-                if not aller_par_etapes(bras, x, y, args.z, bavard=False):
+                if not aller_asservi(asser, x, y, args.z):
                     print(f"  {nom:<14} ({x:+.2f}, {y:+.2f}) inatteignable")
                     continue
                 time.sleep(DELAI_POSE)
@@ -539,15 +542,20 @@ def cmd_viser(args):
         print("Ajoutez --aller pour y envoyer la pince.")
         return 0
 
-    from materiel.approche import aller_par_etapes
+    from materiel.approche import aller_asservi, revenir_au_neutre_asservi
+    from materiel.asservissement import asservissement_pour
     from materiel.servos import BrasServos
     from materiel.simulation import BrasSimule
 
     bras = BrasSimule(bavard=True) if args.simu else BrasServos(args.port)
     try:
-        # Par étapes : la cible est souvent loin de la pose où le bras attend,
-        # et un saut direct serait refusé par la limite d'écart articulaire.
-        if aller_par_etapes(bras, x, y, z):
+        # Boucle continue : mouvement fluide, et la cible est souvent loin de
+        # la pose où le bras attend, d'où le repli par la pose neutre.
+        with asservissement_pour(bras) as asser:
+            atteint = aller_asservi(asser, x, y, z) or (
+                revenir_au_neutre_asservi(asser)
+                and aller_asservi(asser, x, y, z))
+        if atteint:
             atteinte = bras.position_pince()
             print(f"Pince en ({atteinte[0]:+.3f}, {atteinte[1]:+.3f}, "
                   f"{atteinte[2]:+.3f}) m. Comparez avec l'endroit cliqué : "

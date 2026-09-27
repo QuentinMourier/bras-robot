@@ -276,6 +276,39 @@ class BusServos:
             sid: bytes([pas & 0xFF, (pas >> 8) & 0xFF])
             for sid, pas in cibles.items()})
 
+    def consignes_groupe(self, consignes: dict) -> None:
+        """Position ET vitesse de plusieurs servos, en une trame.
+
+        `consignes` associe un identifiant au couple (position en pas, vitesse
+        en pas/s). Les registres 42 a 47 etant contigus — position, temps de
+        parcours, vitesse — les six octets partent d'un bloc.
+
+        Pourquoi rafraichir aussi la vitesse, et pas seulement la position :
+        mesure du 27 septembre 2026 sur le bras reel, en echantillonnant un axe
+        a 945 Hz pendant un deplacement. Avec une vitesse servo figee a 105
+        deg/s et un profil avancant a 25 deg/s, le servo recevait une consigne
+        0,5 deg plus loin, s'y precipitait en 5 ms puis attendait 15 ms : 79 %
+        des releves en plein trajet etaient a vitesse quasi nulle. Le mouvement
+        etait un arret-depart a 50 Hz, parfaitement visible a l'oeil.
+
+        En donnant au servo la vitesse que le profil demande vraiment, il est
+        encore en train d'avancer quand la consigne suivante arrive, et le
+        mouvement redevient continu.
+
+        Le temps de parcours (registres 44-45) est laisse a zero : c'est la
+        vitesse qui mene, ce qui est le mode habituel de ces servos.
+        """
+        donnees = {}
+        for sid, (pas, vitesse) in consignes.items():
+            # Une vitesse de 0 ne veut pas dire « immobile » mais « vitesse
+            # maximale » sur cette famille de servos : il faut donc un plancher
+            # strictement positif, sans quoi un axe a l'arret partirait a fond.
+            v = max(1, min(0x7FFF, int(abs(vitesse))))
+            donnees[sid] = bytes([pas & 0xFF, (pas >> 8) & 0xFF,
+                                  0x00, 0x00,
+                                  v & 0xFF, (v >> 8) & 0xFF])
+        self.ecrire_groupe(ADR_POS_CIBLE, donnees)
+
     def preparer_groupe(self, sids, vitesse: int, accel: int) -> None:
         """Règle accélération et vitesse de plusieurs servos, en deux trames.
 

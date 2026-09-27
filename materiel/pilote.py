@@ -23,17 +23,19 @@ La cible ne bouge que si le mouvement réussit : un refus (hors butées, IK qui
 ne converge pas, obstacle) la laisse où elle était, pour que l'affichage reste
 le reflet de la réalité.
 
+Les déplacements passent par la boucle d'asservissement continue : la consigne
+part aussitôt et le bras y glisse, au lieu d'attendre l'arrivée palier par
+palier. Le pilotage en devient réactif, et le mouvement fluide.
+
 Sécurité, sur le bras réel :
   - le pas vaut 1 cm par défaut, donc chaque mouvement est petit ;
-  - toutes les protections de BrasServos s'appliquent (butées mesurées,
-    paliers de 10°, surveillance de charge) ;
+  - butées mesurées, vitesse et accélération bornées, surveillance de charge ;
   - `touch /tmp/bras-stop` depuis un autre terminal fige tout ;
   - Ctrl-C fige le bras sur place.
 
-À FAIRE UNE FOIS avec cet outil : vérifier le sens latéral. Appuyez sur la
-flèche gauche et regardez de quel côté part réellement le bras. Si la flèche
-« gauche » l'envoie à droite, c'est que le sens de l'axe 1 est inversé — voir
-etalonnage.SENS_LATERAUX_VERIFIES, encore à False à ce jour.
+Le sens latéral a été vérifié avec cet outil le 20 septembre 2026 : la flèche
+gauche fait bien partir le bras dans le sens trigonométrique, conformément au
+modèle (voir etalonnage.SENS_LATERAUX_VERIFIES).
 """
 
 import argparse
@@ -43,6 +45,8 @@ import tty
 
 import numpy as np
 
+from materiel.approche import aller_asservi, revenir_au_neutre_asservi
+from materiel.asservissement import asservissement_pour
 from materiel.etalonnage import SENS_LATERAUX_VERIFIES
 from materiel.servos import BAUD_DEFAUT, PORT_DEFAUT, BrasServos
 from materiel.simulation import BrasSimule
@@ -92,7 +96,7 @@ def afficher_aide():
 """)
 
 
-def piloter(bras, pas: float, simu: bool) -> None:
+def piloter(bras, pas: float, simu: bool, asser) -> None:
     """Boucle de pilotage. Le terminal est déjà en mode caractère par caractère."""
     depart = np.array(bras.position_pince(), dtype=float)
     cible = depart.copy()
@@ -138,7 +142,7 @@ def piloter(bras, pas: float, simu: bool) -> None:
             continue
 
         if touche == "r":
-            if bras.aller_a(*depart):
+            if aller_asservi(asser, *depart):
                 cible = depart.copy()
                 print(f"  retour au départ ({cible[0]:+.3f}, {cible[1]:+.3f}, "
                       f"{cible[2]:+.3f}) m")
@@ -150,7 +154,9 @@ def piloter(bras, pas: float, simu: bool) -> None:
             continue
 
         demande = cible + np.array(DEPLACEMENTS[touche], dtype=float) * pas
-        if bras.aller_a(*demande):
+        # Asservi : la consigne part aussitôt et le bras y glisse, au lieu
+        # d'attendre l'arrivée palier par palier. Le jog en devient réactif.
+        if aller_asservi(asser, *demande, tolerance=pas * 0.4, delai=6.0):
             cible = demande
             print(f"  ({cible[0]:+.3f}, {cible[1]:+.3f}, {cible[2]:+.3f}) m")
         else:
@@ -202,7 +208,8 @@ def main():
     try:
         if interactif:
             tty.setcbreak(descripteur)
-        piloter(bras, args.pas / 100, args.simu)
+        with asservissement_pour(bras) as asser:
+            piloter(bras, args.pas / 100, args.simu, asser)
     except KeyboardInterrupt:
         bras.stop()
         print("\nInterrompu : le bras est figé sur place.")

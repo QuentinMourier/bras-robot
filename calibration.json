@@ -1,13 +1,14 @@
 {
-  "date": "2026-09-20 22:36:30",
-  "note": "Axe 1 re-mesure le 20 septembre 2026 apres deplacement et re-serrage du bras sur son support. Les axes 2 a 6 conservent le releve du 1er aout 2026 : leurs butees sont internes au bras et le support ne les affecte pas.",
+  "date": "2026-09-27 22:59:31",
+  "note": "Axe 1 re-mesure le 27 septembre 2026 apres fixation definitive du socle dans une pince. Ses bornes decrivent l espace degage autour du bras (multiprise d un cote, cables de l autre), non des butees mecaniques. Axes 2 a 6 : releve du 1er aout 2026, butees internes au bras, inchangees.",
   "axes": {
     "1": {
       "nom": "shoulder_pan",
-      "min_deg": -46.32,
-      "max_deg": 69.17,
-      "amplitude_deg": 115.49,
-      "releve": "2026-09-20"
+      "min_deg": -38.41,
+      "max_deg": 45.88,
+      "amplitude_deg": 84.29,
+      "releve": "2026-09-27",
+      "nature": "espace degage, non butee mecanique"
     },
     "2": {
       "nom": "shoulder_lift",

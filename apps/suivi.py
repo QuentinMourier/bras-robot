@@ -56,8 +56,9 @@ from vision.detection import (DetecteurCouleur, direction_sur_table,
                               orientation_fiable)
 from vision.etalonnage_camera import charger_homographie, pixel_vers_table
 
-PERIODE_VISION = 0.05        # s : plafond de cadence, la caméra fait le reste
+PERIODE_VISION = 0.0         # s : aucun plafond, la caméra donne sa cadence
 LISSAGE = 0.45               # 0 = cible figée, 1 = aucun lissage
+RECUL_SUIVI_M = 0.015        # la pince se tient en retrait de la cible
 SAUT_ABERRANT_M = 0.12       # au-delà, on tient la détection pour fausse
 ECART_ORIENTATION_MAX = np.radians(35.0)
 RECUL_SAISIE_M = 0.05        # distance de pré-saisie, en retrait de la cible
@@ -66,12 +67,14 @@ RECUL_SAISIE_M = 0.05        # distance de pré-saisie, en retrait de la cible
 class Vision(threading.Thread):
     """Détecte la cible en continu et tient à jour sa position sur la table."""
 
-    def __init__(self, camera, detecteur, homographie, hauteur):
+    def __init__(self, camera, detecteur, homographie, hauteur,
+                 lissage: float = LISSAGE):
         super().__init__(daemon=True, name="vision")
         self.camera = camera
         self.detecteur = detecteur
         self.homographie = homographie
         self.hauteur = hauteur
+        self.lissage = lissage
 
         self._verrou = threading.Lock()
         self._position = None       # (x, y) lissé, repère du bras
@@ -114,7 +117,7 @@ class Vision(threading.Thread):
                     np.linalg.norm(nouvelle - ancienne) > SAUT_ABERRANT_M:
                 return
             self._position = nouvelle if ancienne is None \
-                else ancienne + (nouvelle - ancienne) * LISSAGE
+                else ancienne + (nouvelle - ancienne) * self.lissage
             if orientation_fiable(cible):
                 self._direction = direction_sur_table(cible, self.homographie)
             self._vue_a = time.monotonic()
@@ -160,10 +163,23 @@ class Application:
                                     vitesse_max=args.vitesse,
                                     bavard=True)
         self.vision = Vision(self.camera, DetecteurCouleur(args.couleur),
-                             self.homographie, self.hauteur)
+                             self.homographie, self.hauteur,
+                             lissage=args.lissage)
         self.suit = False
 
     # -- actions -------------------------------------------------------
+    def en_retrait(self, position):
+        """Point situé `recul` mètres en avant de la cible, côté bras.
+
+        On ne vise jamais le doigt lui-même : la pince s'y cognerait. Le
+        retrait se prend le long du rayon partant de la base, direction selon
+        laquelle le bras aborde naturellement un point de la table.
+        """
+        distance = float(np.linalg.norm(position))
+        if distance < 1e-6:
+            return position
+        return position - position / distance * self.args.recul
+
     def angles_consigne(self):
         return np.array(degres_vers_angles(self.asser.profil.consigne))
 
@@ -197,9 +213,9 @@ class Application:
 
         # Pré-saisie en retrait, puis approche : la pince arrive sur l'objet
         # par un mouvement franc au lieu de le pousser de biais.
-        recul = np.array([x, y]) - np.array([x, y]) / np.linalg.norm([x, y]) \
+        pre = np.array([x, y]) - np.array([x, y]) / np.linalg.norm([x, y]) \
             * RECUL_SAISIE_M
-        self.asser.viser(recul[0], recul[1], self.hauteur)
+        self.asser.viser(pre[0], pre[1], self.hauteur)
         self.asser.attendre_arrivee(delai=8)
         self.asser.viser(x, y, self.hauteur)
         self.asser.attendre_arrivee(delai=8)
@@ -300,6 +316,12 @@ def main():
     parseur.add_argument("--simu", action="store_true")
     parseur.add_argument("--port", default="/dev/ttyACM0")
     parseur.add_argument("--frequence", type=float, default=50.0)
+    parseur.add_argument("--recul", type=float, default=RECUL_SUIVI_M,
+                         help="retrait de la pince devant la cible, en m "
+                              f"(défaut {RECUL_SUIVI_M})")
+    parseur.add_argument("--lissage", type=float, default=LISSAGE,
+                         help="0 = cible figée, 1 = aucun lissage "
+                              "(monter pour plus de réactivité)")
     parseur.add_argument("--vitesse", type=float, default=60.0,
                          help="vitesse articulaire maxi, deg/s "
                               "(commencer bas au premier essai)")
