@@ -47,7 +47,10 @@ import tty
 
 import numpy as np
 
+from cinematique.ik import angles_utiles
 from cinematique.orientation import roulis_pour_aligner
+from cinematique.securite import ik_est_valide
+from materiel.etalonnage import angles_vers_degres, limiter
 from materiel.asservissement import (Asservissement, SortieServos,
                                      SortieSimulee)
 from materiel.etalonnage import AXES_BRAS, ZERO_DEG, degres_vers_angles
@@ -68,13 +71,14 @@ class Vision(threading.Thread):
     """Détecte la cible en continu et tient à jour sa position sur la table."""
 
     def __init__(self, camera, detecteur, homographie, hauteur,
-                 lissage: float = LISSAGE):
+                 lissage: float = LISSAGE, filtre=None):
         super().__init__(daemon=True, name="vision")
         self.camera = camera
         self.detecteur = detecteur
         self.homographie = homographie
         self.hauteur = hauteur
         self.lissage = lissage
+        self.filtre = filtre     # (x, y) -> bool : la cible est-elle a portee ?
 
         self._verrou = threading.Lock()
         self._position = None       # (x, y) lissé, repère du bras
@@ -95,18 +99,23 @@ class Vision(threading.Thread):
                 continue
             self.images += 1
 
-            cible = self.detecteur.detecter(image)
-            if cible is not None:
-                self._integrer(cible)
+            # On parcourt les candidats du plus gros au plus petit et on
+            # retient le premier que le bras puisse atteindre : la plus grosse
+            # tache n'est pas forcément la bonne (bouteille, livre...).
+            for cible in self.detecteur.detecter_plusieurs(image):
+                if self._integrer(cible):
+                    break
             self.periode = time.monotonic() - debut
 
             reste = PERIODE_VISION - self.periode
             if reste > 0:
                 time.sleep(reste)
 
-    def _integrer(self, cible):
+    def _integrer(self, cible) -> bool:
         x, y = pixel_vers_table(cible.u, cible.v, self.homographie)
         nouvelle = np.array([x, y], dtype=float)
+        if self.filtre is not None and not self.filtre(x, y):
+            return False
 
         with self._verrou:
             ancienne = self._position
@@ -115,13 +124,14 @@ class Vision(threading.Thread):
             # plutôt que d'envoyer le bras à l'autre bout de la table.
             if ancienne is not None and \
                     np.linalg.norm(nouvelle - ancienne) > SAUT_ABERRANT_M:
-                return
+                return False
             self._position = nouvelle if ancienne is None \
                 else ancienne + (nouvelle - ancienne) * self.lissage
             if orientation_fiable(cible):
                 self._direction = direction_sur_table(cible, self.homographie)
             self._vue_a = time.monotonic()
             self.detections += 1
+        return True
 
     def derniere(self, fraicheur_max: float = 1.0):
         """(position, direction) si la détection est récente, sinon (None, None)."""
@@ -130,6 +140,17 @@ class Vision(threading.Thread):
                     time.monotonic() - self._vue_a > fraicheur_max:
                 return None, None
             return self._position.copy(), self._direction
+
+
+_dernier_refus = [0.0]
+
+
+def maintenant_ignore(_application) -> bool:
+    """Limite l'affichage des refus à un par seconde, pour ne pas noyer l'écran."""
+    if time.monotonic() - _dernier_refus[0] < 1.0:
+        return False
+    _dernier_refus[0] = time.monotonic()
+    return True
 
 
 def lire_touche(delai: float = 0.2):
@@ -164,10 +185,31 @@ class Application:
                                     bavard=True)
         self.vision = Vision(self.camera, DetecteurCouleur(args.couleur),
                              self.homographie, self.hauteur,
-                             lissage=args.lissage)
+                             lissage=args.lissage,
+                             filtre=lambda x, y: self.atteignable(
+                                 x, y, self.hauteur))
         self.suit = False
 
     # -- actions -------------------------------------------------------
+    def atteignable(self, x: float, y: float, z: float) -> bool:
+        """Vrai si le back-end accepterait vraiment cette cible.
+
+        Contrôle qui manquait, et dont l'absence a coûté cher le 27 septembre
+        2026 : la détection prend la plus grosse tache de la couleur cherchée,
+        or la table en portait d'autres — une bouteille, un livre — situées
+        HORS de la zone étalonnée. L'homographie y est extrapolée, donc elle
+        rend une position fantaisiste, vers laquelle l'asservissement s'est mis
+        à tirer jusqu'à écraser la pince sur la table.
+
+        Une cible que le bras ne peut pas atteindre n'est pas une cible : on
+        l'ignore, et le bras reste où il est.
+        """
+        ok, solution, _, _ = ik_est_valide(x, y, z)
+        if not ok:
+            return False
+        degres = angles_vers_degres(angles_utiles(solution))
+        return not any(limiter(sid, degres[sid])[1] for sid in AXES_BRAS)
+
     def en_retrait(self, position):
         """Point situé `recul` mètres en avant de la cible, côté bras.
 
@@ -191,6 +233,10 @@ class Application:
             return
         self.suit = False
         x, y = float(position[0]), float(position[1])
+        if not self.atteignable(x, y, self.hauteur):
+            print(f"  cible ({x:+.3f}, {y:+.3f}) hors d'atteinte — saisie "
+                  "abandonnée")
+            return
         print(f"  saisie de ({x:+.3f}, {y:+.3f})")
 
         if direction is not None:

@@ -78,6 +78,12 @@ VITESSE_SERVO_MINI = 8      # pas/s : 0 signifierait « vitesse maximale »
 # 0,05 s de plus sur un trajet de 1,7 s.
 TOLERANCE_ARRIVEE_M = 0.002  # 2 mm : on considère la cible atteinte
 
+# Plancher : aucune consigne ne descend plus bas, quoi qu'on demande. Les
+# butées articulaires n'empêchent nullement d'écraser la pince sur la table —
+# observé le 27 septembre 2026, une cible aberrante issue de la vision a fait
+# plonger le bras jusqu'au contact. Ce plancher est le garde-fou qui manquait.
+Z_MINI_M = 0.025
+
 
 class Arret(Exception):
     """La boucle s'est arrêtée d'elle-même (butée, charge, arrêt d'urgence)."""
@@ -213,12 +219,14 @@ class Asservissement:
                  charge_max: int = CHARGE_MAX,
                  vitesse_cartesienne: float = VITESSE_CART_M_S,
                  accel_cartesienne: float = ACCEL_CART_M_S2,
+                 z_mini: float = Z_MINI_M,
                  axes_ik=AXES_POSITION, bavard: bool = False):
         self.sortie = sortie
         self.dt = 1.0 / frequence
         self.charge_max = charge_max
         self.vitesse_cartesienne = vitesse_cartesienne
         self.accel_cartesienne = accel_cartesienne
+        self.z_mini = z_mini
         self.axes_ik = axes_ik
         self.bavard = bavard
 
@@ -236,9 +244,14 @@ class Asservissement:
 
     # -- pilotage ------------------------------------------------------
     def viser(self, x: float, y: float, z: float) -> None:
-        """Fixe une cible cartésienne. La boucle s'y dirige par la jacobienne."""
+        """Fixe une cible cartésienne. La boucle s'y dirige par la jacobienne.
+
+        La hauteur est bornée par `z_mini` : une cible sous le plancher est
+        remontée dessus plutôt que refusée, pour qu'une erreur de vision fasse
+        au pire viser trop haut, jamais s'écraser sur la table.
+        """
         with self._verrou:
-            self._cible_xyz = np.array([x, y, z], dtype=float)
+            self._cible_xyz = np.array([x, y, max(z, self.z_mini)], dtype=float)
 
     def viser_angles(self, angles) -> None:
         """Fixe un but articulaire (rad), court-circuitant la cinématique."""

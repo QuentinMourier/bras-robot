@@ -21,6 +21,10 @@ ce dépôt, c'est la surveillance de charge du bras réel qui protège des
 collisions, pas la géométrie.
 """
 
+import json
+import time
+from pathlib import Path
+
 import numpy as np
 
 from materiel.etalonnage import (AXES_BRAS, NOMS_ARM101, ZERO_DEG,
@@ -33,6 +37,44 @@ ETAPES_MAX = 8
 # ARTICULAIRE — chaque axe y est loin de ses butées, donc l'IK lancée de là
 # trouve des solutions franches plutôt que des contorsions.
 POSE_NEUTRE_DEG = {sid: ZERO_DEG[sid] for sid in AXES_BRAS}
+
+# Pose de REPOS : celle où l'on laisse le bras en fin de session. Distincte de
+# la pose neutre, qui sert à l'IK et non au rangement.
+#
+# La neutre a le bras tendu à l'horizontale, ce qui est mauvais pour se reposer
+# — couple coupé, il tombe de haut. Une bonne pose de repos est basse et
+# repliée, pour que relâcher les moteurs ne provoque presque aucune chute.
+#
+# Elle n'est pas calculée mais RELEVÉE : la chercher par optimisation donne des
+# postures contorsionnées ou en contact avec le socle, que le modèle ignore
+# puisqu'il ne connaît ni le support ni les collisions du bras avec lui-même.
+# On préfère donc la poser à la main, moteurs relâchés, et l'enregistrer.
+FICHIER_REPOS = Path(__file__).parent.parent / "pose_repos.json"
+
+
+def pose_repos():
+    """Pose de repos relevée, ou la pose neutre si aucune n'a été enregistrée."""
+    try:
+        donnees = json.loads(FICHIER_REPOS.read_text(encoding="utf-8"))
+        return {int(sid): float(v) for sid, v in donnees["degres"].items()}
+    except (FileNotFoundError, KeyError, ValueError):
+        return dict(POSE_NEUTRE_DEG)
+
+
+def enregistrer_pose_repos(degres: dict, note: str = "") -> None:
+    """Retient la pose courante comme pose de repos."""
+    FICHIER_REPOS.write_text(json.dumps(
+        {"date": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "note": note or "posée à la main, moteurs relâchés",
+         "degres": {str(sid): round(float(v), 2)
+                    for sid, v in degres.items()}},
+        indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def aller_au_repos_asservi(asser, delai: float = 25.0,
+                           tolerance_deg: float = 2.0) -> bool:
+    """Amène le bras à la pose de repos relevée, par la boucle continue."""
+    return _rejoindre_angles(asser, pose_repos(), delai, tolerance_deg)
 
 PAS_ARTICULAIRE_DEG = 45.0
 
@@ -141,23 +183,26 @@ def aller_asservi(asser, x: float, y: float, z: float,
     return asser.attendre_arrivee(tolerance=tolerance, delai=delai)
 
 
-def revenir_au_neutre_asservi(asser, delai: float = 20.0,
-                              tolerance_deg: float = 1.5) -> bool:
-    """Ramène le bras à POSE_NEUTRE_DEG par la boucle continue.
+def _rejoindre_angles(asser, cible_deg: dict, delai: float,
+                      tolerance_deg: float) -> bool:
+    """Vise des ANGLES et attend que la consigne les ait rejoints.
 
-    On vise des ANGLES et non un point : la pose neutre est définie dans
-    l'espace articulaire, et y aller par la cinématique inverse rendrait une
-    posture différente pour la même position de pince.
+    On vise des angles et non un point : ces poses sont définies dans l'espace
+    articulaire, et y aller par la cinématique inverse rendrait une posture
+    différente pour la même position de pince.
     """
-    import time
-
-    asser.viser_angles(np.array(degres_vers_angles(POSE_NEUTRE_DEG)))
+    asser.viser_angles(np.array(degres_vers_angles(cible_deg)))
     fin = time.monotonic() + delai
     while time.monotonic() < fin:
         consigne = asser.etat()["consigne_deg"]
-        ecart = max(abs(consigne[sid] - POSE_NEUTRE_DEG[sid])
-                    for sid in AXES_BRAS)
-        if ecart <= tolerance_deg:
+        if max(abs(consigne[sid] - cible_deg[sid])
+               for sid in AXES_BRAS) <= tolerance_deg:
             return True
         time.sleep(asser.dt)
     return False
+
+
+def revenir_au_neutre_asservi(asser, delai: float = 20.0,
+                              tolerance_deg: float = 1.5) -> bool:
+    """Ramène le bras à POSE_NEUTRE_DEG par la boucle continue."""
+    return _rejoindre_angles(asser, POSE_NEUTRE_DEG, delai, tolerance_deg)

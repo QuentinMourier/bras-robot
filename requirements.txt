@@ -1,0 +1,22 @@
+# Dépendances du projet, telles qu'installées sur le Raspberry Pi 5.
+#
+#     python3 -m venv venv
+#     venv/bin/pip install -r requirements.txt
+#
+# picamera2 n'y figure PAS volontairement : il est fourni par Raspberry Pi OS
+# (paquet python3-picamera2) et s'installe mal depuis pip, ses extensions
+# s'appuyant sur libcamera. Le venv doit donc être créé avec accès aux paquets
+# du système :
+#
+#     python3 -m venv --system-site-packages venv
+#
+# Seule vision/camera.py en dépend ; tout le reste — cinématique, pilote série,
+# simulation — fonctionne sans caméra.
+
+ikpy==4.0.0           # cinématique directe et inverse à partir de l'URDF
+numpy==2.5.1
+scipy==1.18.0         # optimiseur employé par ikpy
+pyserial==3.5         # la seule dépendance du pilote des servos
+opencv-python==5.0.0.93   # seuillage, homographie, RANSAC
+matplotlib==3.11.1    # tracés et animations de la simulation
+pillow==11.1.0        # écriture des GIF animés

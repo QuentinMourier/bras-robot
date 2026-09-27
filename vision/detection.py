@@ -69,6 +69,38 @@ class DetecteurCouleur:
         # Ouverture : enlève les pixels isolés sans ronger la tache utile.
         return cv2.morphologyEx(total, cv2.MORPH_OPEN, NOYAU)
 
+    def detecter_plusieurs(self, image, maximum: int = 6):
+        """Les taches de la couleur, de la plus grande à la plus petite.
+
+        Rendre plusieurs candidats, et non la seule plus grande, est ce qui
+        permet de suivre le bon objet quand la scène en contient d'autres de la
+        même couleur. Observé le 27 septembre 2026 : une bouteille rouge et un
+        livre rouge, tous deux hors de la zone atteignable, éclipsaient le
+        bouchon que l'on voulait suivre. L'appelant peut désormais parcourir
+        les candidats et retenir le premier qui soit à portée du bras.
+        """
+        import cv2
+
+        contours, _ = cv2.findContours(self.masque(image), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        gardes = [c for c in contours
+                  if cv2.contourArea(c) >= self.surface_min]
+        gardes.sort(key=cv2.contourArea, reverse=True)
+        return [self._mesurer(c) for c in gardes[:maximum]]
+
+    @staticmethod
+    def _mesurer(contour):
+        import cv2
+
+        aire = float(cv2.contourArea(contour))
+        (u, v), (a, b), angle_deg = cv2.minAreaRect(contour)
+        if a < b:
+            a, b = b, a
+            angle_deg += 90.0
+        return Cible(u=float(u), v=float(v), aire=aire,
+                     angle=float(np.radians(angle_deg)),
+                     largeur=float(b), longueur=float(a))
+
     def detecter(self, image):
         """Plus grande tache de la couleur, ou None. Voir `Cible`.
 
@@ -80,24 +112,8 @@ class DetecteurCouleur:
         """
         import cv2
 
-        contours, _ = cv2.findContours(self.masque(image), cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-        contour = max(contours, key=cv2.contourArea)
-        aire = float(cv2.contourArea(contour))
-        if aire < self.surface_min:
-            return None
-
-        (u, v), (a, b), angle_deg = cv2.minAreaRect(contour)
-        # minAreaRect ne garantit pas quel côté est le grand : on remet
-        # l'angle sur le grand côté, seul porteur d'information.
-        if a < b:
-            a, b = b, a
-            angle_deg += 90.0
-        return Cible(u=float(u), v=float(v), aire=aire,
-                     angle=float(np.radians(angle_deg)),
-                     largeur=float(b), longueur=float(a))
+        candidats = self.detecter_plusieurs(image, maximum=1)
+        return candidats[0] if candidats else None
 
 
 def orientation_fiable(cible, rapport_min: float = 1.3) -> bool:
