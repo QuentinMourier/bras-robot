@@ -6,3 +6,8 @@ yolo*_ncnn_model/
 *.onnx
 *.png
 *.gif
+
+# Les captures et tracés générés restent hors du dépôt, mais les
+# illustrations du README doivent y être.
+!media/
+!media/**

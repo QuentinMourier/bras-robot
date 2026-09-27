@@ -7,7 +7,16 @@ et saisie guidée par une caméra.
 Aucun SDK constructeur, aucun framework robotique — tout est construit à partir
 du protocole série et de l'URDF officiel, pour comprendre chaque maillon.
 
-> **Démo vidéo :** *(à insérer)*
+<p align="center">
+  <img src="media/suivi-doigt.gif" alt="Le bras suit un doigt en direct" width="380">
+</p>
+
+<p align="center">
+  <em>Le bras suit le doigt en direct : la caméra repère le repère coloré, une
+  cinématique différentielle convertit l'écart en consigne articulaire, et une
+  boucle à 50 Hz maintient la pince à 1,5 cm en avant.</em><br>
+  <a href="https://youtube.com/shorts/wYSlx46ZlL8">▶ Démonstration complète (1 min)</a>
+</p>
 
 ---
 
