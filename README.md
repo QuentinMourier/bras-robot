@@ -1,234 +1,231 @@
-# Bras robotisé SO-ARM101 — saisie guidée par la vision
+# SO-ARM101 robotic arm — vision-guided grasping
 
-Pilotage complet d'un bras à 5 axes depuis un Raspberry Pi 5 : pilote série
-écrit de zéro, cinématique inverse, étalonnage œil-main, asservissement continu
-et saisie guidée par une caméra.
+A complete control stack for a 5-axis arm running on a Raspberry Pi 5: a serial
+driver written from scratch, inverse kinematics, hand-eye calibration, a
+continuous control loop, and camera-guided grasping.
 
-Aucun SDK constructeur, aucun framework robotique — tout est construit à partir
-du protocole série et de l'URDF officiel, pour comprendre chaque maillon.
+No vendor SDK, no robotics framework — everything is built up from the serial
+protocol and the official URDF, so that every link in the chain is understood.
+
+*(Le README en français est [ici](README.fr.md) — le code et les commentaires
+sont en français.)*
 
 <p align="center">
-  <img src="media/suivi-doigt.gif" alt="Le bras suit un doigt en direct" width="380">
+  <img src="media/suivi-doigt.gif" alt="The arm tracking a finger in real time" width="380">
 </p>
 
 <p align="center">
-  <em>Le bras suit le doigt en direct : la caméra repère le repère coloré, une
-  cinématique différentielle convertit l'écart en consigne articulaire, et une
-  boucle à 50 Hz maintient la pince à 1,5 cm en avant.</em><br>
-  <a href="https://youtube.com/shorts/wYSlx46ZlL8">▶ Démonstration complète (1 min)</a>
+  <em>Live finger tracking: the camera locates the coloured marker, differential
+  kinematics turn the error into a joint command, and a 50 Hz loop holds the
+  gripper 1.5 cm ahead of it.</em><br>
+  <a href="https://youtube.com/shorts/wYSlx46ZlL8">▶ Full demonstration (1 min)</a>
 </p>
 
 ---
 
-## Ce que ça fait
+## What it does
 
-Un objet est posé sur la table. La caméra le repère, l'homographie convertit ses
-pixels en millimètres dans le repère du bras, la cinématique inverse calcule les
-angles, et une boucle d'asservissement à 50 Hz amène la pince dessus sans
-à-coup. Sur commande, les mors s'orientent perpendiculairement à l'objet et le
-saisissent.
+An object sits on the table. The camera finds it, a homography turns its pixels
+into millimetres in the arm's frame, inverse kinematics computes the joint
+angles, and a 50 Hz control loop brings the gripper onto it without a single
+jolt. On command, the jaws rotate perpendicular to the object and close on it.
 
-Le bras peut aussi suivre une cible mobile en direct, la pince se tenant en
-retrait de quelques centimètres.
+The arm can also track a moving target live, holding the gripper a couple of
+centimetres short of it.
 
 ---
 
-## Le matériel
+## Hardware
 
 | | |
 |---|---|
-| Bras | SO-ARM101, 5 axes + pince, servos Feetech STS3215 |
-| Calculateur | Raspberry Pi 5 |
-| Caméra | Module Camera 3 (capteur imx708) |
-| Liaison | série demi-duplex 1 Mbaud, via carte USB |
+| Arm | SO-ARM101, 5 axes + gripper, Feetech STS3215 servos |
+| Computer | Raspberry Pi 5 |
+| Camera | Camera Module 3 (imx708 sensor) |
+| Link | half-duplex serial at 1 Mbaud, over a USB board |
 
 ---
 
 ## Architecture
 
-Le code est découpé pour qu'aucune couche n'ait besoin de connaître les
-suivantes.
+The code is split so that no layer needs to know about the ones above it.
 
 ```
-cinematique/     la géométrie, sans aucun matériel
-  ik.py            cinématique directe et inverse (ikpy + URDF officiel)
-  jacobienne.py    cinématique différentielle, pour le suivi temps réel
-  orientation.py   quel roulis de poignet pour saisir un objet donné
-  securite.py      un mouvement est-il recevable ?
-  enveloppe.py     où la pince peut-elle réellement aller ?
+cinematique/     geometry, no hardware involved
+  ik.py            forward and inverse kinematics (ikpy + official URDF)
+  jacobienne.py    differential kinematics, for real-time tracking
+  orientation.py   which wrist roll grasps a given object
+  securite.py      is this motion acceptable?
+  enveloppe.py     where can the gripper actually reach?
 
-materiel/        le bras, réel ou simulé
-  sts3215.py       pilote série, écrit à partir du protocole SMS/STS
-  interface.py     les cinq questions qu'on pose à un bras
-  servos.py        back-end sur les vrais servos
-  simulation.py    back-end sans matériel, mêmes refus
-  asservissement.py boucle de commande continue à 50 Hz
-  etalonnage.py    butées mesurées, correspondance angle URDF <-> degré servo
+materiel/        the arm, real or simulated
+  sts3215.py       serial driver, written from the SMS/STS protocol
+  interface.py     the five questions you ask an arm
+  servos.py        back-end driving the real servos
+  simulation.py    back-end with no hardware, same refusals
+  asservissement.py continuous 50 Hz control loop
+  etalonnage.py    measured joint limits, URDF angle <-> servo degree mapping
 
-vision/          les yeux
-  camera.py        accès caméra, partagé par tout le reste
-  detection.py     repérage par couleur, position ET orientation
-  etalonnage_camera.py  étalonnage œil-main
+vision/          the eyes
+  camera.py        camera access, shared by everything else
+  detection.py     colour tracking, position AND orientation
+  etalonnage_camera.py  hand-eye calibration
 
-apps/            les applications
-  suivi.py         suit une cible en direct, la saisit sur commande
+apps/            applications
+  suivi.py         tracks a target live, grasps it on command
 ```
 
-Le point qui tient l'ensemble est `materiel/interface.py` : une interface
-abstraite de cinq méthodes. Le code de vision et d'application ne sait pas s'il
-pilote des servos ou une simulation, ce qui permet d'écrire et d'éprouver une
-séquence entière sans brancher le bras.
+What holds it together is `materiel/interface.py`: an abstract interface of five
+methods. The vision and application code has no idea whether it is driving real
+servos or a simulation, which makes it possible to write and exercise a whole
+sequence without plugging the arm in.
 
 ---
 
-## Quelques problèmes résolus
+## Problems worth solving
 
-Ce projet vaut surtout par les défauts qu'il a fallu trouver. Les chiffres
-ci-dessous sont mesurés, pas estimés.
+This project is mostly interesting for the faults that had to be found. Every
+figure below is measured, not estimated.
 
-**Un axe que l'optimiseur choisissait au hasard.** La cible d'une cinématique
-inverse est ici un point, sans orientation, et le roulis du poignet ne déplace
-la pince que de 1 mm par 10°. Pour l'optimiseur, c'était donc un paramètre
-libre, qu'il fixait arbitrairement : trois cibles distantes de 1 cm donnaient
-+161°, +56° et +161° de roulis, toutes à 0,00 mm de la cible. Le garde-fou
-d'écart articulaire refusait alors la plupart des mouvements. Le roulis a été
-retiré de l'optimisation et rendu à sa vraie fonction, orienter la pince.
+**An axis the optimiser was picking at random.** The IK target here is a point,
+with no orientation, and the wrist roll moves the gripper by only 1 mm per 10°.
+To the optimiser it was therefore a free parameter, which it set arbitrarily:
+three targets 1 cm apart produced +161°, +56° and +161° of roll, all within
+0.00 mm of the target. The joint-travel guard then rejected most motions. The
+roll was removed from the optimisation and given back its real job — orienting
+the gripper.
 
-**Des à-coups qui venaient de l'architecture.** L'ancien pilotage découpait
-chaque trajet en paliers de 10° et attendait l'arrivée à chacun : le bras
-décélérait jusqu'à l'arrêt une dizaine de fois par mouvement. Le remplacement
-par une consigne rafraîchie à 50 Hz, jamais interrompue, a donné sur le même
-trajet **8,91 s → 1,98 s**, sans un seul arrêt intermédiaire.
+**Jerky motion that came from the architecture.** The old controller split every
+path into 10° steps and waited for arrival at each one, so the arm decelerated
+to a standstill about ten times per move. Replacing that with a setpoint
+refreshed at 50 Hz and never interrupted gave, on the same path, **8.91 s →
+1.98 s**, with no intermediate stop at all.
 
-**Quinze allers-retours série par palier.** Les consignes partaient registre par
-registre et servo par servo, chacune attendant son accusé. L'instruction SYNC
-WRITE du protocole permet de tout porter dans une trame unique : **15,00 ms →
-0,25 ms**, mesuré sur le bras. Les cinq axes reçoivent désormais leur consigne
-dans la même milliseconde.
+**Fifteen serial round trips per step.** Commands went out register by register
+and servo by servo, each waiting for its acknowledgement. The protocol's SYNC
+WRITE instruction carries them all in a single frame: **15.00 ms → 0.25 ms**,
+measured on the arm. All five axes now receive their setpoint within the same
+millisecond.
 
-**Une cinématique inverse trop lente pour suivre.** L'optimiseur met 18 ms en
-médiane et jusqu'à 328 ms au pire — impossible d'asservir sur une cible mobile.
-Pour un petit déplacement, une passe de cinématique directe donne la jacobienne
-et la correction sort d'une inversion 3×3 : **231 µs, soit 45× plus rapide**. La
-méthode ne peut de surcroît pas changer de configuration du bras, ce qui élimine
-par construction les retournements d'axe à 150°.
+**Inverse kinematics too slow to track.** The optimiser takes 18 ms median and
+up to 328 ms worst case — hopeless for following a moving target. For a small
+displacement, one forward-kinematics pass yields the Jacobian and the correction
+falls out of a 3×3 solve: **231 µs, 45× faster**. As a bonus the method *cannot*
+change the arm's configuration, which rules out 150° axis flips by construction.
 
-**Deux tiers du capteur inutilisés.** Le capteur de la caméra expose un mode
-recadré que la bibliothèque choisit silencieusement pour une sortie en 720p. En
-forçant le mode pleine surface, le champ de vision gagne **un facteur 1,5 dans
-chaque direction** — ce qui a résolu un problème de cadrage sans toucher à la
-caméra.
+**Two thirds of the sensor going unused.** The camera sensor exposes a cropped
+mode that the library silently picks for 720p output. Forcing the full-sensor
+mode widens the field of view by **a factor of 1.5 in each direction** — which
+fixed a framing problem without touching the camera.
 
-**Une erreur mesurée honnêtement.** L'étalonnage œil-main affiche 6,5 mm
-d'erreur de reprojection, mais ce chiffre est mesuré sur les points qui ont servi
-à l'ajustement. Une validation croisée donne **9,8 mm**, et c'est celui-là qui
-compte. Plus important encore, la parallaxe due à un objet 3 cm plus bas que le
-plan étalonné vaut **27 à 30 mm** — trois fois l'erreur d'étalonnage.
+**An error measured honestly.** Hand-eye calibration reports 6.5 mm reprojection
+error, but that figure is measured on the very points used to fit it.
+Cross-validation gives **9.8 mm**, and that is the number that counts. More
+importantly, the parallax from an object sitting 3 cm below the calibrated plane
+is **27 to 30 mm** — three times the calibration error itself.
 
 ---
 
-## L'étalonnage œil-main, sans mire imprimée
+## Hand-eye calibration without a printed target
 
-La caméra dit « objet au pixel (712, 383) », le bras va en mètres. Pour relier
-les deux, la méthode habituelle est d'imprimer un damier. Ici, **le bras est sa
-propre mire** : on amène la pince à des positions que le modèle connaît
-exactement, on photographie, et on pointe la pince dans chaque image.
+The camera says "object at pixel (712, 383)"; the arm works in metres. The usual
+way to bridge the two is to print a checkerboard. Here, **the arm is its own
+calibration target**: the gripper is driven to positions the model knows
+exactly, a photograph is taken at each, and the gripper is clicked in every
+image.
 
-C'est même préférable à une mire : celle-ci donne la relation caméra ↔ mire,
-qu'il reste à relier au bras, alors qu'on mesure ici directement la relation
-caméra ↔ bras.
+This is actually preferable to a printed target: that would give you the
+camera ↔ target relationship, which still has to be tied back to the arm,
+whereas this measures the camera ↔ arm relationship directly.
 
-Les objets à saisir reposant tous sur la table, la transformation cherchée est
-une homographie, ajustée par RANSAC pour qu'un pointage manqué soit écarté
-plutôt que de tirer le résultat.
+Since the objects to be grasped all rest on the table, the transformation sought
+is a homography, fitted with RANSAC so that a missed click is discarded rather
+than allowed to drag the result.
 
 ```bash
-python -m vision.etalonnage_camera cadrage    # la zone tient-elle dans le champ ?
-python -m vision.etalonnage_camera capturer   # le bras parcourt une grille
-python -m vision.etalonnage_camera pointer    # on pointe la pince
-python -m vision.etalonnage_camera ajuster    # homographie + erreur
-python -m vision.etalonnage_camera viser --aller   # on clique, le bras y va
+python -m vision.etalonnage_camera cadrage    # does the work area fit in frame?
+python -m vision.etalonnage_camera capturer   # the arm walks a grid
+python -m vision.etalonnage_camera pointer    # click the gripper in each image
+python -m vision.etalonnage_camera ajuster    # homography + error
+python -m vision.etalonnage_camera viser --aller   # click a spot, the arm goes
 ```
 
 ---
 
-## Sécurité
+## Safety
 
-Faire aller un bras plus vite ne doit pas le rendre moins prudent.
+Making an arm faster must not make it less careful.
 
-- Toute consigne est bornée par les **butées mesurées à la main**, plus sûres
-  que celles de l'URDF : le coude y est déclaré à +96,8° pour une butée réelle
-  à +47,7°.
-- **Vitesse et accélération articulaires bornées**, ce qui supprime les à-coups
-  à la source.
-- **Plancher cartésien** : aucune consigne ne descend sous 2,5 cm. Les butées
-  articulaires n'empêchent nullement d'écraser la pince sur la table.
-- **Surveillance de charge** en continu, un axe par cycle : au-delà du seuil,
-  tout s'arrête.
-- **Arrêt d'urgence par fichier témoin** : `touch /tmp/bras-stop` fige le bras
-  depuis n'importe quelle session, sans toucher au bus série — deux processus
-  qui émettent sur une liaison demi-duplex se brouilleraient.
-- Une cible que le bras ne peut pas atteindre est **ignorée**, et non approchée
-  au plus près.
+- Every setpoint is bounded by **hand-measured joint limits**, which are safer
+  than the URDF's: the elbow is declared there at +96.8° against a real stop at
+  +47.7°.
+- **Joint velocity and acceleration are bounded**, which removes jerk at source.
+- **Cartesian floor**: no setpoint ever goes below 2.5 cm. Joint limits do
+  nothing to stop the gripper being driven into the table.
+- **Continuous load monitoring**, one axis per cycle: past the threshold,
+  everything stops.
+- **Emergency stop through a sentinel file**: `touch /tmp/bras-stop` freezes the
+  arm from any session without touching the serial bus — two processes
+  transmitting on a half-duplex line would garble each other.
+- A target the arm cannot reach is **ignored**, not approached as closely as
+  possible.
 
 ---
 
-## Démarrer
+## Getting started
 
 ```bash
-git clone <ce dépôt> && cd bras-robot
-python3 -m venv venv && venv/bin/pip install -r requirements.txt
+git clone https://github.com/QuentinMourier/bras-robot.git && cd bras-robot
+python3 -m venv --system-site-packages venv
+venv/bin/pip install -r requirements.txt
 
-# Sans aucun matériel : le bras simulé, mêmes sécurités, mêmes refus
+# No hardware at all: the simulated arm, same safeties, same refusals
 venv/bin/python -m materiel.test_bras --simu etat
-venv/bin/python -m materiel.simulation          # un cycle de saisie complet
-venv/bin/python comprendre_simulation.py        # comment tout cela fonctionne
+venv/bin/python -m materiel.simulation          # a full pick-and-place cycle
+venv/bin/python comprendre_simulation.py        # how all of this works
 
-# Avec le bras
+# With the arm
 venv/bin/python -m materiel.test_servos scan
-venv/bin/python -m materiel.pilote              # pilotage au clavier
-venv/bin/python -m apps.suivi --couleur rouge   # suivi et saisie
+venv/bin/python -m materiel.pilote              # keyboard jogging
+venv/bin/python -m apps.suivi --couleur rouge   # tracking and grasping
 ```
 
-`comprendre_simulation.py` est une leçon exécutable en cinq étapes : l'état, la
-cinématique directe, la boucle de simulation, le problème inverse, et ce que la
-simulation ne sait pas faire.
+`comprendre_simulation.py` is a runnable lesson in five steps: state, forward
+kinematics, the simulation loop, the inverse problem, and what the simulation
+cannot do.
 
 ---
 
-## Limites connues
+## Known limitations
 
-Dites franchement, parce qu'elles décident de ce qui marche et de ce qui ne
-marche pas.
+Stated plainly, because they decide what works and what does not.
 
-- **L'homographie ne vaut que pour un plan.** Un pixel désigne un rayon, pas un
-  point : c'est le plan étalonné qui lève l'ambiguïté. Un objet plus haut ou
-  plus bas est localisé à côté, proportionnellement à son écart. S'en affranchir
-  demanderait deux caméras, un capteur de profondeur, ou un étalonnage à deux
-  hauteurs.
-- **La simulation ignore la physique.** Ni gravité, ni contact, ni couple : elle
-  valide la géométrie et la logique, jamais la sûreté. Une trajectoire validée
-  en simulation peut traverser la table.
-- **Aucune détection de collision.** Ni avec la table, ni du bras avec lui-même.
-  C'est la surveillance de charge qui protège, a posteriori.
-- **La pince ouvre à environ 3,5 cm.** Au-delà, l'objet n'est pas saisissable
-  autrement que par un coin.
-- **Certaines orientations de saisie sont inatteignables** selon la posture : le
-  roulis tourne autour de l'avant-bras, ce qui contraint le plan dans lequel les
-  mors peuvent s'écarter. Le code le détecte et le signale plutôt que de serrer
-  de travers.
+- **The homography holds for one plane only.** A pixel denotes a ray, not a
+  point; it is the calibrated plane that resolves the ambiguity. An object
+  higher or lower is located off to the side, in proportion to that offset.
+  Escaping this would take two cameras, a depth sensor, or calibration at two
+  heights.
+- **The simulation ignores physics.** No gravity, no contact, no torque: it
+  validates geometry and logic, never safety. A trajectory validated in
+  simulation can pass straight through the table.
+- **No collision detection**, neither with the table nor of the arm with itself.
+  Load monitoring is what protects, after the fact.
+- **The gripper opens to about 3.5 cm.** Beyond that, an object can only be
+  taken by a corner.
+- **Some grasp orientations are unreachable** depending on posture: the roll
+  turns about the forearm, which constrains the plane the jaws can open in. The
+  code detects this and says so rather than closing at the wrong angle.
 
 ---
 
-## Ce qui reste à faire
+## Next
 
-- Étalonnage à deux hauteurs, pour localiser un objet quelle que soit son
-  épaisseur
-- Détection par apprentissage plutôt que par couleur
-- Séquence de saisie complète autonome, du repérage à la dépose
+- Calibration at two heights, to locate an object whatever its thickness
+- Learned detection instead of colour thresholding
+- A fully autonomous grasp sequence, from spotting to placing
 
 ---
 
-Le code et les commentaires sont en français. Les messages de commit
-documentent les mesures et les impasses autant que les solutions : c'est
-souvent ce qu'on ne retrouve plus six mois après.
+Code and comments are in French. Commit messages document the measurements and
+the dead ends as much as the solutions — that is usually what you can no longer
+reconstruct six months later.
